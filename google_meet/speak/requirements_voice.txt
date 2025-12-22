@@ -1,0 +1,20 @@
+# Voice Assistant Dependencies - Pipecat-based
+# Only installed when building with ENABLE_VOICE=true
+
+# Pipecat Framework - need a recent version for DeepgramHttpTTSService
+pipecat-ai[deepgram,groq]>=0.0.50
+
+# Deepgram SDK v3+
+deepgram-sdk>=3.0.0
+
+# Groq SDK
+groq>=0.9.0
+
+# HTTP client for DeepgramHttpTTSService
+aiohttp>=3.9.0
+
+# Additional audio processing
+numpy
+scipy
+
+pyaudio>=0.2.14

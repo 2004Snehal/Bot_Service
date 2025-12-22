@@ -207,5 +207,6 @@ Thumbs.db
 *.txt
 !requirements.txt
 !requirements-socket.txt
+!requirements_voice.txt
 *.md
 !README.md
