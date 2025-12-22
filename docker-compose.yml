@@ -1,0 +1,107 @@
+version: '3.8'
+
+services:
+  hicapy-gmeet-bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: hicapy-gmeet-bot
+    image: hicapy-gmeet-bot:latest
+    
+    environment:
+      # WebSocket Configuration
+      SOCKET_URL: ${SOCKET_URL:-ws://socket-tts:8080}
+      SOCKET_JWT_SECRET: ${SOCKET_JWT_SECRET}
+      SOCKET_TIMEOUT: ${SOCKET_TIMEOUT:-30}
+      SOCKET_RECONNECT_ATTEMPTS: ${SOCKET_RECONNECT_ATTEMPTS:-10}
+      
+      # APIs
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY}
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      
+      # Meeting Configuration
+      ENABLE_TRANSCRIPT: ${ENABLE_TRANSCRIPT:-true}
+      ENABLE_RECORDING: ${ENABLE_RECORDING:-false}
+      OUTPUT_DIR: /app/out
+      
+      # Bot Identity
+      BOT_NAME: ${BOT_NAME:-Google Bot}
+      SYSTEM_PROMPT: ${SYSTEM_PROMPT:-You are a helpful meeting assistant.}
+      
+      # Docker/Linux
+      DISPLAY: :99
+      PYTHONUNBUFFERED: 1
+      
+      # Monitoring
+      ENVIRONMENT_NAME: ${ENVIRONMENT_NAME:-production}
+    
+    volumes:
+      # Output files (recordings, transcripts)
+      - ./out:/app/out
+      
+      # Optional: Chrome profile persistence
+      - ./.chrome-profiles:/app/.chrome-profiles
+    
+    # Allow Docker to access host audio/display
+    devices:
+      - /dev/shm:/dev/shm
+    
+    # Network access
+    networks:
+      - cuemeet-network
+    
+    # Restart policy
+    restart: unless-stopped
+    
+    # Resource limits
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '1'
+          memory: 1G
+    
+    # Logging
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
+    
+    # Depends on socket-tts service if local
+    depends_on:
+      - socket-tts
+    
+    # Keep container running
+    stdin_open: true
+    tty: true
+
+  # Optional: Local Socket TTS Microservice
+  socket-tts:
+    image: socket-tts-bot:latest
+    container_name: hicapy-socket-tts
+    
+    environment:
+      GROQ_API_KEY: ${GROQ_API_KEY}
+      DEEPGRAM_API_KEY: ${DEEPGRAM_API_KEY}
+      JWT_SECRET: ${SOCKET_JWT_SECRET}
+      PORT: 8080
+    
+    ports:
+      - "8080:8080"
+    
+    networks:
+      - cuemeet-network
+    
+    restart: unless-stopped
+    
+    # Only include if you have the socket-tts image built
+    # Remove this service if using external socket-tts server
+    profiles:
+      - local-tts  # Only start with: docker-compose --profile local-tts up
+
+networks:
+  cuemeet-network:
+    driver: bridge

@@ -1,0 +1,79 @@
+# --- Virtual Environments & Dependencies (CRITICAL) ---
+venv/
+.venv/
+env/
+ENV/
+.vscode/
+.idea/
+
+# --- Audio & Video Data (The 600MB culprit) ---
+# Ignore all local recordings and temp audio files
+*.wav
+*.mp4
+*.webm
+*.avi
+*.mp3
+*.pcm
+
+# Ignore specific output directories
+recordings/
+out/
+output/
+debug_audio/
+
+# --- Python & Cache ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+.mypy_cache/
+.pytest_cache/
+.coverage
+
+# --- Version Control ---
+.git/
+.gitignore
+.gitattributes
+
+# --- Environment Secrets (Security) ---
+# NOTE: .env is now INCLUDED to simplify local Docker builds
+# For production, use Docker secrets or environment injection instead
+# .env  # Commented out - we want to include .env for local dev
+.env.local
+.env.production
+
+# --- Logs & Databases ---
+*.log
+*.sqlite3
+celerybeat-schedule
+
+# --- IDE/System Junk ---
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# --- Chrome Profile Folders (HUGE - 100s of MB each) ---
+CueMeetProfile*/
+CueMeetProfile_*/
+chrome_profiles/
+user-data/
+*.pma
+DevToolsActivePort
+
+# --- Docker ---
+# You generally don't need the Dockerfile inside the image
+Dockerfile
+docker-compose.yml
+
+# --- Test/Debug Scripts ---
+inspect_*.py
+find_*.py
+check_*.py
+debug_*.py
+test_*.py
+
+# --- Documentation ---
+*.md
+!README.md
