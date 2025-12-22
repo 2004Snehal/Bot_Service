@@ -1,0 +1,55 @@
+# CueMeet Google Bot - Socket-based Audio (Minimal Dependencies)
+# 
+# This requirements file removes heavy ML dependencies (sentence_transformers, torch)
+# and uses WebSocket-based TTS instead.
+#
+# Key changes:
+# - REMOVED: sentence-transformers (Intent classification now in microservice)
+# - REMOVED: torch, numpy (ML dependencies no longer needed)
+# - ADDED: websockets (for WebSocket communication)
+# - ADDED: PyJWT (for JWT token generation)
+# - KEPT: deepgram-sdk (for fallback audio transcription if CC unavailable)
+# - KEPT: selenium, webdriver-manager (browser automation)
+# - KEPT: groq (for future LLM integration if needed)
+#
+# This reduces memory footprint significantly (no PyTorch models loaded)
+
+python-dotenv
+Selenium
+webdriver-manager
+beautifulsoup4
+requests
+
+# ==== Config Management ====
+pydantic-settings
+
+# ==== WebSocket & Network ====
+websockets
+PyJWT
+aiohttp
+
+# ==== Audio Processing ====
+pydub
+soundfile
+sounddevice
+
+# ==== Speech Recognition (Fallback) ====
+deepgram-sdk
+
+# ==== LLM Integration ====
+groq
+
+# ==== Logging & Monitoring ====
+highlight-io
+python-json-logger
+
+# ==== Development/Testing ====
+python-lsp-server
+pytest
+black
+
+# ==== System ====
+# Note: ffmpeg must be installed separately via system package manager
+# Linux: apt-get install ffmpeg
+# macOS: brew install ffmpeg
+# Windows: choco install ffmpeg or download from ffmpeg.org

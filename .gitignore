@@ -206,5 +206,6 @@ Thumbs.db
 # Documentation files (except README.md)
 *.txt
 !requirements.txt
+!requirements-socket.txt
 *.md
 !README.md
