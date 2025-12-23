@@ -248,7 +248,8 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
         logger.info(f"Launching bot subprocess for bot {bot_id} (user: {user_id})...")
 
         # Temp directory for bot to use (bot handles S3 uploads directly)
-        temp_dir = os.getenv("OUTPUT_DIR", "/tmp/cuemeet")
+        # Force /tmp/cuemeet to ensure we don't use project directory
+        temp_dir = "/tmp/cuemeet"
         os.makedirs(temp_dir, exist_ok=True)
         
         # Build environment variables (merge with current env)

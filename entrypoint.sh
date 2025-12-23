@@ -101,7 +101,7 @@ paplay --device=MeetOutput /tmp/test_tone.wav &
 PLAY_PID=$!
 
 echo "  -> Recording from MeetOutput.monitor for 3 seconds..."
-ffmpeg -f pulse -i MeetOutput.monitor -t 3 -ar 16000 -ac 1 /app/out/audio_selftest.wav -y 2>/dev/null &
+ffmpeg -f pulse -i MeetOutput.monitor -t 3 -ar 16000 -ac 1 /tmp/audio_selftest.wav -y 2>/dev/null &
 REC_PID=$!
 
 # Wait for playback and recording to finish
@@ -109,10 +109,11 @@ wait $PLAY_PID 2>/dev/null || true
 wait $REC_PID 2>/dev/null || true
 
 # Check if audio was recorded
-if [ -f /app/out/audio_selftest.wav ]; then
-    SIZE=$(stat -c%s /app/out/audio_selftest.wav 2>/dev/null || echo 0)
+if [ -f /tmp/audio_selftest.wav ]; then
+    SIZE=$(stat -c%s /tmp/audio_selftest.wav 2>/dev/null || echo 0)
     if [ "$SIZE" -gt 1000 ]; then
         echo "✅ Audio Self-Test PASSED: Recorded ${SIZE} bytes"
+        rm /tmp/audio_selftest.wav
     else
         echo "❌ Audio Self-Test FAILED: File too small (${SIZE} bytes). Audio routing broken."
     fi

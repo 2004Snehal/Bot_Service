@@ -76,7 +76,8 @@ class JoinGoogleMeet:
                     logger.warning(f"Failed to initialize S3 client: {e}")
         
         # Temp directory for recording (will be uploaded to S3 and deleted)
-        self.temp_dir = os.getenv("OUTPUT_DIR", "/tmp/cuemeet")
+        # Use /tmp/cuemeet by default to avoid polluting project directory
+        self.temp_dir = "/tmp/cuemeet"
         os.makedirs(self.temp_dir, exist_ok=True)
 
         self.user_id = os.getenv("USER_ID")
@@ -536,11 +537,12 @@ class JoinGoogleMeet:
         # Linux/WSL Specific Commands
         if platform.system().lower().startswith("linux"):
             # Audio-only recording (for transcription/backup)
-            file_command = ["ffmpeg", "-y", "-f", "pulse", "-i", pulse_monitor, "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le", output_wav_file]
+            # file_command = ["ffmpeg", "-y", "-f", "pulse", "-i", pulse_monitor, "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le", output_wav_file]
             # command = ["ffmpeg", "-y", "-f", "pulse", "-i", pulse_monitor, "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]
             
             # CRITICAL: Use DEVNULL for stderr to prevent process hanging when buffer fills
-            self.file_recording_process = subprocess.Popen(file_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # self.file_recording_process = subprocess.Popen(file_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.file_recording_process = None # Disabled local audio recording
             
             # Start VAD monitoring after admission
             if self.audio_in and not self.audio_in.running:
@@ -647,12 +649,13 @@ class JoinGoogleMeet:
 
         try:
             pulse_monitor = "MeetOutput.monitor" if platform.system().lower().startswith("linux") else "default"
-            output_wav_file = f"{base}.wav"
-            file_command = [
-                "ffmpeg", "-y", "-f", "pulse", "-i", pulse_monitor,
-                "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le", output_wav_file
-            ]
-            self.file_recording_process = subprocess.Popen(file_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            # output_wav_file = f"{base}.wav"
+            # file_command = [
+            #     "ffmpeg", "-y", "-f", "pulse", "-i", pulse_monitor,
+            #     "-ac", "1", "-ar", "16000", "-acodec", "pcm_s16le", output_wav_file
+            # ]
+            # self.file_recording_process = subprocess.Popen(file_command, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.file_recording_process = None
         except Exception as e:
             self.logger.error(f"❌ Failed to resume file recording: {e}")
 
@@ -718,21 +721,21 @@ class JoinGoogleMeet:
         # Ensure ffmpeg has finished writing the MP4 header
         time.sleep(1)
         
-        # Convert WAV to OPUS for upload
-        wav_file = f"{self.output_file}.wav"
-        opus_file = f"{self.output_file}.opus"
+        # Convert WAV to OPUS for upload - DISABLED (No local audio files)
+        # wav_file = f"{self.output_file}.wav"
+        # opus_file = f"{self.output_file}.opus"
         
-        if os.path.exists(wav_file) and not os.path.exists(opus_file):
-            self.logger.info("Converting WAV to OPUS...")
-            try:
-                subprocess.run([
-                    "ffmpeg", "-y", "-i", wav_file, 
-                    "-c:a", "libopus", "-b:a", "32k", 
-                    opus_file
-                ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                self.logger.info("✅ Conversion complete")
-            except Exception as e:
-                self.logger.error(f"❌ Conversion failed: {e}")
+        # if os.path.exists(wav_file) and not os.path.exists(opus_file):
+        #     self.logger.info("Converting WAV to OPUS...")
+        #     try:
+        #         subprocess.run([
+        #             "ffmpeg", "-y", "-i", wav_file, 
+        #             "-c:a", "libopus", "-b:a", "32k", 
+        #             opus_file
+        #         ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        #         self.logger.info("✅ Conversion complete")
+        #     except Exception as e:
+        #         self.logger.error(f"❌ Conversion failed: {e}")
 
     def save_transcript(self):
         try:
@@ -748,6 +751,7 @@ class JoinGoogleMeet:
                 'user_id': self.user_id,
                 'meeting_id': self.meeting_id,
             }
+            # Save to temp path for S3 upload
             with open(self.transcript_path, 'w', encoding='utf-8') as f:
                 json.dump(transcript_json, f, ensure_ascii=False, indent=2)
         except Exception as e:
@@ -795,13 +799,21 @@ class JoinGoogleMeet:
             if os.path.exists(recording_path):
                 s3_key = f"meetings/meet_{self.meeting_id}/video/recording.mp4"
                 if self.upload_to_s3(recording_path, s3_key, "video/mp4"):
-                    os.remove(recording_path)  # Clean up temp file
+                    try:
+                        os.remove(recording_path)  # Clean up temp file
+                        self.logger.info(f"Deleted local recording: {recording_path}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to delete local recording: {e}")
             
             # Upload transcript (JSON)
             if os.path.exists(self.transcript_path):
                 s3_key = f"meetings/meet_{self.meeting_id}/transcript/transcript.json"
                 if self.upload_to_s3(self.transcript_path, s3_key, "application/json"):
-                    os.remove(self.transcript_path)  # Clean up temp file
+                    try:
+                        os.remove(self.transcript_path)  # Clean up temp file
+                        self.logger.info(f"Deleted local transcript: {self.transcript_path}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to delete local transcript: {e}")
             
             # Upload metadata
             metadata_path = os.path.join(self.temp_dir, f"{self.meeting_id}_metadata.json")
@@ -818,7 +830,11 @@ class JoinGoogleMeet:
                     json.dump(metadata, f, indent=2)
                 s3_key = f"meetings/meet_{self.meeting_id}/metadata/meeting.json"
                 if self.upload_to_s3(metadata_path, s3_key, "application/json"):
-                    os.remove(metadata_path)  # Clean up temp file
+                    try:
+                        os.remove(metadata_path)  # Clean up temp file
+                        self.logger.info(f"Deleted local metadata: {metadata_path}")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to delete local metadata: {e}")
             except Exception as e:
                 self.logger.error(f"Error creating/uploading metadata: {e}")
                 
