@@ -55,8 +55,6 @@ if __name__ == "__main__":
             end_time_utc = convert_timestamp_to_utc(args.end_time) if args.end_time else None,
             min_record_time=args.min_record_time,
             bot_name=args.bot_name,
-            presigned_url_combined=args.presigned_url_combined,
-            presigned_url_audio=args.presigned_url_audio,
             max_waiting_time=args.max_waiting_time,
             enable_speak=args.speak,
             project_settings=get_settings(),

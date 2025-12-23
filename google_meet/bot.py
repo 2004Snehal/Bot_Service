@@ -8,6 +8,8 @@ import requests
 import platform
 import subprocess
 import soundfile as sf
+import boto3
+from botocore.exceptions import ClientError
 from datetime import datetime, timezone
 from threading import Event
 from groq import Groq
@@ -39,8 +41,6 @@ class JoinGoogleMeet:
         end_time_utc, 
         min_record_time=3600, 
         bot_name="Google Bot", 
-        presigned_url_combined=None, 
-        presigned_url_audio=None, 
         max_waiting_time=1800, 
         project_settings: Settings = None, 
         logger: logging = None, 
@@ -61,27 +61,30 @@ class JoinGoogleMeet:
         self.file_recording_process = None
         self.recording_paused = False
         self.recording_segment_index = 1
-        self.presigned_url_combined = presigned_url_combined
-        self.presigned_url_audio = presigned_url_audio
         self.enable_speak = enable_speak
         self.id = str(uuid.uuid4())
         
-        self.output_dir = os.getenv("OUTPUT_DIR", os.path.join(os.getcwd(), "out"))
-        os.makedirs(self.output_dir, exist_ok=True)
-        # Ensure subfolders exist
-        try:
-            os.makedirs(os.path.join(self.output_dir, "transcripts"), exist_ok=True)
-            os.makedirs(os.path.join(self.output_dir, "recordings"), exist_ok=True)
-            os.makedirs(os.path.join(self.output_dir, "screenshots"), exist_ok=True)
-        except Exception:
-            pass
+        # S3 configuration (using IAM roles - no credentials needed)
+        self.s3_bucket = os.getenv("S3_BUCKET_NAME")
+        self.aws_region = os.getenv("AWS_REGION", "us-east-1")
+        self.s3_client = None
+        if self.s3_bucket:
+            try:
+                self.s3_client = boto3.client('s3', region_name=self.aws_region)
+            except Exception as e:
+                if logger:
+                    logger.warning(f"Failed to initialize S3 client: {e}")
+        
+        # Temp directory for recording (will be uploaded to S3 and deleted)
+        self.temp_dir = os.getenv("OUTPUT_DIR", "/tmp/cuemeet")
+        os.makedirs(self.temp_dir, exist_ok=True)
 
         self.user_id = os.getenv("USER_ID")
         self.meeting_id = os.getenv("MEETING_ID")
-        # Base output for audio/recording (keep legacy naming)
-        self.output_file = os.path.join(self.output_dir, self.id)
-        # Canonical transcript path based on meeting_id
-        self.transcript_path = os.path.join(self.output_dir, "transcripts", f"{self.meeting_id or self.id}_transcript.json")
+        # Temp paths for recording (will be uploaded to S3)
+        self.output_file = os.path.join(self.temp_dir, self.id)
+        self.transcript_path = os.path.join(self.temp_dir, f"{self.meeting_id or self.id}_transcript.json")
+        self.recording_path = os.path.join(self.temp_dir, f"{self.meeting_id or self.id}_recording.mp4")
         
         self.enable_recording = os.getenv("ENABLE_RECORDING", "False").lower() == "true"
         self.enable_transcript = os.getenv("ENABLE_TRANSCRIPT", "False").lower() == "true"
@@ -354,8 +357,7 @@ class JoinGoogleMeet:
             body_text = self.browser.find_element(By.TAG_NAME, "body").text
             if "Return to home screen" in body_text:
                 self.logger.error("Bot is on the 'Return to home screen' page.")
-            screenshot_path = os.path.join("out", f"debug_join_{self.id}.png")
-            self.browser.save_screenshot(screenshot_path)
+            # Debug screenshots removed - using S3-only storage
         except Exception as e:
             self.logger.error(f"Failed to log debug info: {e}")
 
@@ -552,7 +554,8 @@ class JoinGoogleMeet:
             self.recording_start_time = time.perf_counter()
 
             if self.enable_recording:
-                video_file = f"{self.output_file}_recording.mp4"
+                # Use the canonical recording path for S3 upload
+                video_file = self.recording_path
                 # Screen recording with audio
                 # Using libmp3lame for audio as it's very compatible
                 screen_command = [
@@ -639,7 +642,7 @@ class JoinGoogleMeet:
         self.recording_segment_index += 1
         segment_suffix = f"_seg{self.recording_segment_index}"
         # Update base only for segment-specific files; transcript path remains meeting-scoped
-        base = os.path.join(self.output_dir, self.id + segment_suffix)
+        base = os.path.join(self.temp_dir, self.id + segment_suffix)
         self.logger.info("▶️ Resuming recording; starting new segment...")
 
         try:
@@ -750,18 +753,75 @@ class JoinGoogleMeet:
         except Exception as e:
             self.logger.error(f"Error saving transcript: {e}")
 
+    def upload_to_s3(self, file_path: str, s3_key: str, content_type: str) -> bool:
+        """Upload a file directly to S3 using IAM roles."""
+        if not self.s3_client or not self.s3_bucket:
+            self.logger.warning("S3 not configured. Skipping upload.")
+            return False
+        
+        try:
+            self.logger.info(f"Uploading {file_path} to S3: s3://{self.s3_bucket}/{s3_key}")
+            self.s3_client.upload_file(
+                file_path,
+                self.s3_bucket,
+                s3_key,
+                ExtraArgs={
+                    'ContentType': content_type,
+                    'Metadata': {
+                        'user_id': self.user_id or '',
+                        'meeting_id': self.meeting_id or '',
+                        'upload_time': datetime.utcnow().isoformat()
+                    }
+                }
+            )
+            self.logger.info(f"✅ Successfully uploaded to S3: {s3_key}")
+            return True
+        except ClientError as e:
+            self.logger.error(f"S3 upload failed for {s3_key}: {e}")
+            return False
+        except Exception as e:
+            self.logger.error(f"Unexpected error uploading to S3: {e}")
+            return False
+
     def upload_files(self):
-        try: 
-            if self.presigned_url_combined:
-                full_path = create_tar_archive(f"{self.output_file}.json", f"{self.output_file}.opus", self.output_file)
-                if os.path.exists(full_path):
-                    with open(full_path, 'rb') as file:
-                        requests.put(self.presigned_url_combined, data=file, headers={'Content-Type': 'application/x-tar'})
-            if self.presigned_url_audio:
-                audio_path = audio_file_path(f"{self.output_file}.opus")
-                if os.path.exists(audio_path):
-                    with open(audio_path, 'rb') as file:
-                        requests.put(self.presigned_url_audio, data=file, headers={'Content-Type': 'audio/opus'})
+        """Upload all meeting files to S3 and clean up temp files."""
+        if not self.meeting_id:
+            self.logger.warning("No meeting_id set. Cannot upload to S3.")
+            return
+        
+        try:
+            # Upload recording (MP4 video)
+            recording_path = self.recording_path
+            if os.path.exists(recording_path):
+                s3_key = f"meetings/meet_{self.meeting_id}/video/recording.mp4"
+                if self.upload_to_s3(recording_path, s3_key, "video/mp4"):
+                    os.remove(recording_path)  # Clean up temp file
+            
+            # Upload transcript (JSON)
+            if os.path.exists(self.transcript_path):
+                s3_key = f"meetings/meet_{self.meeting_id}/transcript/transcript.json"
+                if self.upload_to_s3(self.transcript_path, s3_key, "application/json"):
+                    os.remove(self.transcript_path)  # Clean up temp file
+            
+            # Upload metadata
+            metadata_path = os.path.join(self.temp_dir, f"{self.meeting_id}_metadata.json")
+            try:
+                metadata = {
+                    'meeting_id': self.meeting_id,
+                    'user_id': self.user_id,
+                    'bot_name': self.bot_name,
+                    'start_time': self.event_start_time.isoformat() if self.event_start_time else None,
+                    'end_time': datetime.now(timezone.utc).isoformat(),
+                    'upload_time': datetime.utcnow().isoformat()
+                }
+                with open(metadata_path, 'w') as f:
+                    json.dump(metadata, f, indent=2)
+                s3_key = f"meetings/meet_{self.meeting_id}/metadata/meeting.json"
+                if self.upload_to_s3(metadata_path, s3_key, "application/json"):
+                    os.remove(metadata_path)  # Clean up temp file
+            except Exception as e:
+                self.logger.error(f"Error creating/uploading metadata: {e}")
+                
         except Exception as e:
             self.logger.error(f"Upload error: {e}")
 

@@ -547,7 +547,8 @@ class TranscriptExtractor:
         """Save transcript to JSON file."""
         if not filepath:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            filepath = f"/app/out/transcript_{self.meeting_id}_{timestamp}.json"
+            temp_dir = os.getenv("OUTPUT_DIR", "/tmp/cuemeet")
+            filepath = os.path.join(temp_dir, f"transcript_{self.meeting_id}_{timestamp}.json")
         
         transcript = self.get_transcript()
         

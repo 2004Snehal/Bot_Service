@@ -247,6 +247,10 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
         # Fallback: subprocess on host
         logger.info(f"Launching bot subprocess for bot {bot_id} (user: {user_id})...")
 
+        # Temp directory for bot to use (bot handles S3 uploads directly)
+        temp_dir = os.getenv("OUTPUT_DIR", "/tmp/cuemeet")
+        os.makedirs(temp_dir, exist_ok=True)
+        
         # Build environment variables (merge with current env)
         env_vars = os.environ.copy()
         env_vars.update({
@@ -256,10 +260,13 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
             "TTS_MICROSERVICE_URL": os.getenv("TTS_MICROSERVICE_URL", "https://smolservice.onrender.com"),
             "DEEPGRAM_API_KEY": os.getenv("DEEPGRAM_API_KEY", ""),
             "GROQ_API_KEY": os.getenv("GROQ_API_KEY", ""),
-            "OUTPUT_DIR": user_storage,  # Tell bot where to save files
+            "OUTPUT_DIR": temp_dir,  # Temp directory (bot uploads to S3 directly)
             "ENABLE_RECORDING": str(enable_recording),
             "ENABLE_TRANSCRIPT": str(enable_transcript),
             "ENABLE_SPEAK": str(enable_speak),
+            # AWS S3 - using IAM roles (no explicit credentials)
+            "AWS_REGION": os.getenv("AWS_REGION", "us-east-1"),
+            "S3_BUCKET_NAME": os.getenv("S3_BUCKET_NAME", ""),
         })
         if system_prompt:
             env_vars["SYSTEM_PROMPT"] = system_prompt
@@ -286,10 +293,13 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
         logger.info(f"Bot process started: PID {process.pid}")
         meeting_record.status = "running"
         
-        # Store expected file paths
-        meeting_record.transcript_file = os.path.join(user_storage, "transcripts", f"{meeting_id}_transcript.json")
-        meeting_record.recording_file = os.path.join(user_storage, "recordings", f"{meeting_id}_recording.mp4")
-        meeting_record.screenshots_dir = os.path.join(user_storage, "screenshots", meeting_id)
+        # S3 URLs will be set by the bot directly - we just track expected paths
+        s3_bucket = os.getenv("S3_BUCKET_NAME", "")
+        aws_region = os.getenv("AWS_REGION", "us-east-1")
+        if s3_bucket:
+            base_s3_url = f"https://{s3_bucket}.s3.{aws_region}.amazonaws.com/meetings/meet_{meeting_id}"
+            meeting_record.recording_s3_url = f"{base_s3_url}/video/recording.mp4"
+            meeting_record.transcript_s3_url = f"{base_s3_url}/transcript/transcript.json"
         db.commit()
         
         # Track the process (store PID instead of container)
@@ -304,30 +314,8 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
         if exit_code == 0:
             meeting_record.status = "completed"
             logger.info(f"Bot {bot_id} completed successfully")
-            
-            # Upload to S3 if configured
-            try:
-                from server.app.services.storage import upload_meeting_to_s3
-                
-                if enable_recording and os.path.exists(meeting_record.recording_file):
-                    s3_url = upload_meeting_to_s3(meeting_record.recording_file, user_id, str(meeting_id))
-                    if s3_url:
-                        meeting_record.recording_s3_url = s3_url
-                        logger.info(f"Recording uploaded to S3: {s3_url}")
-                
-                if enable_transcript and os.path.exists(meeting_record.transcript_file):
-                    # Upload transcript JSON to S3
-                    transcript_s3_url = upload_meeting_to_s3(meeting_record.transcript_file, user_id, str(meeting_id), file_type="transcript")
-                    if transcript_s3_url:
-                        meeting_record.transcript_s3_url = transcript_s3_url
-                        logger.info(f"Transcript uploaded to S3: {transcript_s3_url}")
-                        # Delete local transcript to use S3 only
-                        os.remove(meeting_record.transcript_file)
-                        meeting_record.transcript_file = None  # Clear local path since it's on S3
-                
-                db.commit()
-            except Exception as e:
-                logger.error(f"Failed to upload to cloud storage: {e}")
+            # Bot handles S3 uploads directly, no need to upload here
+            db.commit()
         else:
             meeting_record.status = "failed"
             logger.error(f"Bot {bot_id} exited with code {exit_code}")
