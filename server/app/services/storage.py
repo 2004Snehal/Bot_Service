@@ -28,11 +28,11 @@ def upload_meeting_to_s3(file_path: str, user_id: str, meeting_id: str, file_typ
     Returns:
         S3 URL if successful, None otherwise
     """
-    # Check if S3 is configured
+    # Check if S3 is configured (only need bucket name and region now)
     from server.app.config.settings import settings
     
-    if not all([settings.AWS_ACCESS_KEY_ID, settings.AWS_SECRET_ACCESS_KEY, settings.S3_BUCKET_NAME]):
-        logger.warning("S3 not configured. Skipping upload.")
+    if not settings.S3_BUCKET_NAME:
+        logger.warning("S3 bucket not configured. Skipping upload.")
         return None
     
     try:
@@ -41,21 +41,32 @@ def upload_meeting_to_s3(file_path: str, user_id: str, meeting_id: str, file_typ
         
         s3_client = boto3.client(
             's3',
-            aws_access_key_id=settings.AWS_ACCESS_KEY_ID,
-            aws_secret_access_key=settings.AWS_SECRET_ACCESS_KEY,
             region_name=settings.AWS_REGION
         )
         
-        # S3 key structure: {user_id}/{meeting_id}/{file_type}_{meeting_id}.ext
-        file_ext = os.path.splitext(file_path)[1]
-        s3_key = f"{user_id}/{meeting_id}/{file_type}_{meeting_id}{file_ext}"
+        # New S3 key structure: meetings/meet_{meeting_id}/{category}/filename
+        # Map file types to appropriate subdirectories
+        file_category_map = {
+            "recording": "video/recording.mp4",
+            "transcript": "transcript/transcript.json",
+            "transcript_vtt": "transcript/transcript.vtt",
+            "summary": "summary/summary.json",
+            "metadata": "metadata/meeting.json"
+        }
+        
+        # Get the appropriate path based on file type
+        if file_type in file_category_map:
+            s3_key = f"meetings/meet_{meeting_id}/{file_category_map[file_type]}"
+        else:
+            # Fallback for unknown file types
+            file_ext = os.path.splitext(file_path)[1]
+            s3_key = f"meetings/meet_{meeting_id}/{file_type}_{meeting_id}{file_ext}"
         
         # Determine content type
         content_type_map = {
             ".mp4": "video/mp4",
-            ".opus": "audio/opus",
-            ".wav": "audio/wav",
-            ".json": "application/json"
+            ".json": "application/json",
+            ".vtt": "text/vtt"
         }
         content_type = content_type_map.get(file_ext, "application/octet-stream")
         

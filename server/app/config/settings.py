@@ -16,19 +16,13 @@ class Settings(BaseSettings):
     PORT: int = 8000
     DEBUG: bool = False
     
-    # Storage paths (for user data: transcripts, recordings, screenshots)
-    # Uses ./storage relative to project root, or set STORAGE_BASE_PATH env var
-    #STORAGE_BASE_PATH: str = "/app/storage"  # Base path for all user data use while using docker comment below
-    STORAGE_BASE_PATH: str = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))), "storage")
-    
+
     # SECURITY: Admin API key for user management
     # Generate with: python -c "import secrets; print(secrets.token_urlsafe(32))"
     # MUST be set in production!
     ADMIN_API_KEY: Optional[str] = None
     
-    # AWS S3 Configuration (Optional - for cloud storage)
-    AWS_ACCESS_KEY_ID: Optional[str] = None
-    AWS_SECRET_ACCESS_KEY: Optional[str] = None
+    # AWS S3 Configuration (using IAM roles)
     AWS_REGION: str = "us-east-1"
     S3_BUCKET_NAME: Optional[str] = None
     

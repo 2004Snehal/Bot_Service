@@ -210,3 +210,4 @@ Thumbs.db
 !requirements_voice.txt
 *.md
 !README.md
+migrate_storage_schema.py

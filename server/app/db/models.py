@@ -60,13 +60,12 @@ class Meeting(Base):
     start_time = Column(DateTime, default=datetime.utcnow)
     end_time = Column(DateTime, nullable=True)
     
-    # Local file paths (for development/backup)
-    transcript_file = Column(String, nullable=True)
-    recording_file = Column(String, nullable=True)
-    
-    # Cloud storage (S3 URLs) - Organized as {user_id}/{meeting_id}/
+    # Cloud storage (S3 URLs) - Organized as meetings/meet_{meeting_id}/
     transcript_s3_url = Column(String, nullable=True)
+    transcript_vtt_s3_url = Column(String, nullable=True)
     recording_s3_url = Column(String, nullable=True)
+    summary_s3_url = Column(String, nullable=True)
+    metadata_s3_url = Column(String, nullable=True)
     
     # Recording settings
     recording_enabled = Column(Boolean, default=True)

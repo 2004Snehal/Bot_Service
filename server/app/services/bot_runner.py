@@ -21,27 +21,7 @@ def get_docker_client():
     return docker_client
 
 
-def get_user_storage_path(user_id: str) -> str:
-    """
-    Get the storage path for a user's data.
-    Creates the directory structure if it doesn't exist.
-    
-    Structure:
-        /app/storage/{user_id}/
-            meetings/
-            transcripts/
-            recordings/
-            screenshots/
-    """
-    from server.app.config.settings import settings
-    
-    base_path = os.path.join(settings.STORAGE_BASE_PATH, user_id)
-    
-    # Create subdirectories
-    for subdir in ["meetings", "transcripts", "recordings", "screenshots"]:
-        os.makedirs(os.path.join(base_path, subdir), exist_ok=True)
-    
-    return base_path
+
 
 
 # ============================================================================
@@ -182,9 +162,6 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
     
     db = SessionLocal()
     
-    # Create user storage directory
-    user_storage = get_user_storage_path(user_id)
-    
     # Get existing meeting record
     meeting_record = db.query(Meeting).filter(Meeting.meeting_id == meeting_id).first()
     if not meeting_record:
@@ -207,13 +184,10 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
                 "TTS_MICROSERVICE_URL": os.getenv("TTS_MICROSERVICE_URL", "https://smolservice.onrender.com"),
                 "DEEPGRAM_API_KEY": os.getenv("DEEPGRAM_API_KEY", ""),
                 "GROQ_API_KEY": os.getenv("GROQ_API_KEY", ""),
-                "OUTPUT_DIR": "/app/out",
                 "ENABLE_RECORDING": str(enable_recording),
                 "ENABLE_TRANSCRIPT": str(enable_transcript),
                 "ENABLE_SPEAK": str(enable_speak),
-                # AWS S3 for uploads
-                "AWS_ACCESS_KEY_ID": os.getenv("AWS_ACCESS_KEY_ID", ""),
-                "AWS_SECRET_ACCESS_KEY": os.getenv("AWS_SECRET_ACCESS_KEY", ""),
+                # AWS S3 - using IAM roles from EC2 instance (no explicit credentials needed)
                 "AWS_REGION": os.getenv("AWS_REGION", "us-east-1"),
                 "S3_BUCKET_NAME": os.getenv("S3_BUCKET_NAME", ""),
             }
@@ -227,11 +201,6 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
                 "--min-record-time", str(min_record_time)
             ]
 
-            # Volume mount user storage
-            volumes = {
-                user_storage: {"bind": "/app/out", "mode": "rw"}
-            }
-
             container_name = f"bot_{bot_id}_{str(meeting_id)[:8]}"
             container = client.containers.run(
                 image=image_ref,
@@ -240,16 +209,11 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
                 name=container_name,
                 environment=env_vars,
                 command=command,
-                shm_size="2g",
-                volumes=volumes
+                shm_size="2g"
             )
 
             logger.info(f"Container started: {container.id}")
             meeting_record.status = "running"
-            # Expected file paths
-            meeting_record.transcript_file = os.path.join(user_storage, "transcripts", f"{meeting_id}_transcript.json")
-            meeting_record.recording_file = os.path.join(user_storage, "recordings", f"{meeting_id}_recording.mp4")
-            meeting_record.screenshots_dir = os.path.join(user_storage, "screenshots", str(meeting_id))
             db.commit()
 
             # Track container (store container object)
@@ -263,32 +227,6 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
             if exit_code == 0:
                 meeting_record.status = "completed"
                 logger.info(f"Bot {bot_id} completed successfully (container)")
-                
-                # Upload to S3 if configured and delete local files
-                try:
-                    from server.app.services.storage import upload_meeting_to_s3
-                    
-                    if enable_recording and os.path.exists(meeting_record.recording_file):
-                        s3_url = upload_meeting_to_s3(meeting_record.recording_file, user_id, str(meeting_id))
-                        if s3_url:
-                            meeting_record.recording_s3_url = s3_url
-                            logger.info(f"Recording uploaded to S3: {s3_url}")
-                            # Optionally delete local recording to save space
-                            # os.remove(meeting_record.recording_file)
-                    
-                    if enable_transcript and os.path.exists(meeting_record.transcript_file):
-                        # Upload transcript JSON to S3
-                        transcript_s3_url = upload_meeting_to_s3(meeting_record.transcript_file, user_id, str(meeting_id), file_type="transcript")
-                        if transcript_s3_url:
-                            meeting_record.transcript_s3_url = transcript_s3_url
-                            logger.info(f"Transcript uploaded to S3: {transcript_s3_url}")
-                            # Delete local transcript to use S3 only
-                            os.remove(meeting_record.transcript_file)
-                            meeting_record.transcript_file = None  # Clear local path since it's on S3
-                    
-                    db.commit()
-                except Exception as e:
-                    logger.error(f"Failed to upload to cloud storage: {e}")
             else:
                 meeting_record.status = "failed"
                 logger.error(f"Container exited with code {exit_code}")
