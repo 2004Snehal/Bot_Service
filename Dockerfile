@@ -37,7 +37,8 @@ RUN wget -q https://dl.google.com/linux/direct/google-chrome-stable_current_amd6
 COPY requirements-socket.txt .
 RUN --mount=type=cache,target=/root/.cache/pip \
     pip install --upgrade pip \
-    && pip install --timeout=20000 -r requirements-socket.txt
+    && pip install --timeout=20000 -r requirements-socket.txt \
+    && pip install boto3
 
 # Conditionally install voice dependencies (Pipecat) if ENABLE_VOICE=true
 COPY google_meet/speak/requirements_voice.txt ./google_meet/speak/

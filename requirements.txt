@@ -18,3 +18,4 @@ python-dotenv==1.0.1
 sentence-transformers>=2.2.2
 boto3==1.35.77
 pymongo==4.10.1
+boto3
