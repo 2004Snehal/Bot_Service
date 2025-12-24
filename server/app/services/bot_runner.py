@@ -189,7 +189,7 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
                 "ENABLE_SPEAK": str(enable_speak),
                 # AWS S3 - using IAM roles from EC2 instance (no explicit credentials needed)
                 "AWS_REGION": os.getenv("AWS_REGION", "us-east-1"),
-                "S3_BUCKET_NAME": os.getenv("S3_BUCKET_NAME", ""),
+                "S3_BUCKET_NAME": os.getenv("S3_BUCKET_NAME", "hicapy"),
             }
             if system_prompt:
                 env_vars["SYSTEM_PROMPT"] = system_prompt
