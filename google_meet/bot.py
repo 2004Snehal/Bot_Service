@@ -76,9 +76,11 @@ class JoinGoogleMeet:
                     logger.warning(f"Failed to initialize S3 client: {e}")
         
         # Temp directory for recording (will be uploaded to S3 and deleted)
-        # Use /tmp/cuemeet by default to avoid polluting project directory
-        self.temp_dir = "/tmp/cuemeet"
-        # Do not create any local storage folder outside /tmp/cuemeet
+        # Use /tmp/hicapy by default to avoid polluting project directory and for branding
+        self.temp_dir = "/tmp/hicapy"
+        # Ensure temp directory exists
+        os.makedirs(self.temp_dir, exist_ok=True)
+        # Do not create any local storage folder outside /tmp/hicapy
 
         self.user_id = os.getenv("USER_ID")
         self.meeting_id = os.getenv("MEETING_ID")
