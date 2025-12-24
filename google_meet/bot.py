@@ -78,7 +78,7 @@ class JoinGoogleMeet:
         # Temp directory for recording (will be uploaded to S3 and deleted)
         # Use /tmp/cuemeet by default to avoid polluting project directory
         self.temp_dir = "/tmp/cuemeet"
-        os.makedirs(self.temp_dir, exist_ok=True)
+        # Do not create any local storage folder outside /tmp/cuemeet
 
         self.user_id = os.getenv("USER_ID")
         self.meeting_id = os.getenv("MEETING_ID")
