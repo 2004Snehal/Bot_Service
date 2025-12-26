@@ -779,23 +779,10 @@ class JoinGoogleMeet:
                 file_path,
                 self.s3_bucket,
                 s3_key,
-                        transcript = None
-                        chat_data = None
-                        title = None
-                        # Prefer Python-side transcript extractor if available
-                        if self.transcript_extractor and hasattr(self.transcript_extractor, 'get_transcript'):
-                            transcript = self.transcript_extractor.get_transcript()
-                            # Save to file as well
-                            if hasattr(self.transcript_extractor, 'save_transcript'):
-                                self.transcript_extractor.save_transcript(self.transcript_path)
-                            else:
-                                with open(self.transcript_path, 'w', encoding='utf-8') as f:
-                                    json.dump(transcript, f, ensure_ascii=False, indent=2)
-                            self.logger.info(f"💾 Transcript saved to: {self.transcript_path}")
-                            return self.transcript_path
-                        else:
-                            self.logger.error("Transcript extractor not initialized or missing get_transcript method.")
-                            return None
+                ExtraArgs={'ContentType': content_type}
+            )
+            return True
+        except Exception as e:
             self.logger.error(f"Unexpected error uploading to S3: {e}")
             return False
 
