@@ -740,22 +740,30 @@ class JoinGoogleMeet:
         #         self.logger.error(f"❌ Conversion failed: {e}")
 
     def save_transcript(self):
+        """
+        Save transcript in strict format:
+        {
+          "meeting_id": ...,
+          "meeting_start_ms": ...,
+          "meeting_end_ms": ...,
+          "bot_name": ...,
+          "participants": [...],
+          "event_count": ...,
+          "events": [...]
+        }
+        """
         try:
-            transcript_data = self.browser.execute_script("return localStorage.getItem('transcript');")
-            chat_data = self.browser.execute_script("return localStorage.getItem('chatMessages');")
-            title = self.browser.execute_script("return localStorage.getItem('meetingTitle');")
-            transcript_json = {
-                'title': title,
-                'meeting_start_time': self.event_start_time.isoformat() if self.event_start_time else None,
-                'meeting_end_time': datetime.now(timezone.utc).isoformat(),
-                'transcript': json.loads(transcript_data) if transcript_data else None,
-                'chat_messages': json.loads(chat_data) if chat_data else None,
-                'user_id': self.user_id,
-                'meeting_id': self.meeting_id,
-            }
-            # Save to temp path for S3 upload
-            with open(self.transcript_path, 'w', encoding='utf-8') as f:
-                json.dump(transcript_json, f, ensure_ascii=False, indent=2)
+            if self.transcript_extractor and hasattr(self.transcript_extractor, 'get_transcript'):
+                transcript = self.transcript_extractor.get_transcript()
+                # Save to file as well
+                if hasattr(self.transcript_extractor, 'save_transcript'):
+                    self.transcript_extractor.save_transcript(self.transcript_path)
+                else:
+                    with open(self.transcript_path, 'w', encoding='utf-8') as f:
+                        json.dump(transcript, f, ensure_ascii=False, indent=2)
+                self.logger.info(f"💾 Transcript saved to: {self.transcript_path}")
+            else:
+                self.logger.error("Transcript extractor not initialized or missing get_transcript method.")
         except Exception as e:
             self.logger.error(f"Error saving transcript: {e}")
 
@@ -771,21 +779,23 @@ class JoinGoogleMeet:
                 file_path,
                 self.s3_bucket,
                 s3_key,
-                ExtraArgs={
-                    'ContentType': content_type,
-                    'Metadata': {
-                        'user_id': self.user_id or '',
-                        'meeting_id': self.meeting_id or '',
-                        'upload_time': datetime.utcnow().isoformat()
-                    }
-                }
-            )
-            self.logger.info(f"✅ Successfully uploaded to S3: {s3_key}")
-            return True
-        except ClientError as e:
-            self.logger.error(f"S3 upload failed for {s3_key}: {e}")
-            return False
-        except Exception as e:
+                        transcript = None
+                        chat_data = None
+                        title = None
+                        # Prefer Python-side transcript extractor if available
+                        if self.transcript_extractor and hasattr(self.transcript_extractor, 'get_transcript'):
+                            transcript = self.transcript_extractor.get_transcript()
+                            # Save to file as well
+                            if hasattr(self.transcript_extractor, 'save_transcript'):
+                                self.transcript_extractor.save_transcript(self.transcript_path)
+                            else:
+                                with open(self.transcript_path, 'w', encoding='utf-8') as f:
+                                    json.dump(transcript, f, ensure_ascii=False, indent=2)
+                            self.logger.info(f"💾 Transcript saved to: {self.transcript_path}")
+                            return self.transcript_path
+                        else:
+                            self.logger.error("Transcript extractor not initialized or missing get_transcript method.")
+                            return None
             self.logger.error(f"Unexpected error uploading to S3: {e}")
             return False
 
