@@ -440,23 +440,37 @@ class TranscriptExtractor:
     ):
         """Add a new transcript event."""
         with self.lock:
-            # Check if we should merge with previous event (same speaker, not finalized)
+            # Check if we should merge with previous event
             if self.events:
                 last_event = self.events[-1]
                 
-                # Merge if same speaker and not finalized
-                if last_event.speaker == speaker and not last_event.end_ms:
-                    last_event.text = text  # Update with latest text
-                    last_event.last_update_ts = int(time.time() * 1000)
-                    
-                    # Trigger callback for updates too
-                    if self.on_transcript:
-                        self.on_transcript(speaker, text)
-                    return
-                else:
-                    # Finalize previous event if not already
+                # Check for same speaker
+                if last_event.speaker == speaker:
+                    # CASE 1: Not finalized - normal merge
                     if not last_event.end_ms:
-                        last_event.finalize()
+                        last_event.text = text  # Update with latest text
+                        last_event.last_update_ts = int(time.time() * 1000)
+                        
+                        # Trigger callback for updates too
+                        if self.on_transcript:
+                            self.on_transcript(speaker, text)
+                        return
+                    
+                    # CASE 2: Finalized but text is a prefix match (Fix for duplication)
+                    # Example: "I am snehal" -> "I am snehal i am a entrepreneur"
+                    clean_last = last_event.text.strip().lower()
+                    clean_new = text.strip().lower()
+                    
+                    # Allow a small tolerance for minor punctuation/capitalization diffs via startswith
+                    if clean_new.startswith(clean_last) and len(clean_new) > len(clean_last):
+                        logger.info(f"🔄 Merging finalized event overlap: '{last_event.text}' -> '{text}'")
+                        last_event.text = text
+                        last_event.end_ms = None  # Un-finalize to allow more updates
+                        last_event.last_update_ts = int(time.time() * 1000)
+                        
+                        if self.on_transcript:
+                            self.on_transcript(speaker, text)
+                        return
             
             # Create new event
             event = TranscriptEvent(
