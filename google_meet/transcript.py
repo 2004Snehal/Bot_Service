@@ -51,7 +51,7 @@ class TranscriptEvent:
         self.end_ms = None
         self.source = source  # "captions", "active_tile", "aria", "bot_audio"
         self.confidence = confidence
-        self.last_update_ts = int(time.time() * 1000)
+        self.last_update_ms = int(time.time() * 1000)
 
     
     def finalize(self, end_ms: int = None):
@@ -77,7 +77,7 @@ class TranscriptExtractor:
     Extracts and manages meeting transcripts with speaker attribution.
     
     Usage:
-        extractor = TranscriptExtractor(browser, bot_name="hicapybot")
+        extractor = TranscriptExtractor(browser, bot_name="hicapybot", utterance_timeout_ms=15000)
         extractor.start()
         ...
         extractor.stop()
@@ -112,17 +112,27 @@ class TranscriptExtractor:
         "cc_button": "button[aria-label*='Turn on captions'], button[aria-label*='Turn off captions']"
     }
     
-    def __init__(self, browser, bot_name: str = "hicapybot", meeting_id: str = None, on_transcript=None):
+    def __init__(
+        self, 
+        browser, 
+        bot_name: str = "hicapybot", 
+        meeting_id: str = None, 
+        on_transcript=None,
+        utterance_timeout_ms: int = 15000  # 15 seconds default
+    ):
         self.browser = browser
         self.bot_name = bot_name
         self.meeting_id = meeting_id or f"meet_{uuid.uuid4().hex[:8]}"
         self.meeting_start_time = int(time.time() * 1000)
         
+        # Time window for grouping utterances (15-20 seconds)
+        self.utterance_timeout_ms = utterance_timeout_ms
+        
         self.events: List[TranscriptEvent] = []
         self.speaker_map: Dict[str, str] = {}  # name -> speaker_id
-        self.current_speaker: Optional[str] = None
-        self.current_text: str = ""
-        self.last_caption_text: str = ""
+        
+        # Current active utterance tracking
+        self.active_utterance: Optional[TranscriptEvent] = None
         
         self.running = False
         self.thread: Optional[threading.Thread] = None
@@ -186,12 +196,6 @@ class TranscriptExtractor:
             logger.error(f"Error enabling captions: {e}")
             return False
     
-    def _normalize_text(self, text: str) -> str:
-        """Normalize text for comparison (collapse whitespace, lowercase)."""
-        if not text:
-            return ""
-        return " ".join(text.lower().split())
-
     def _extract_from_captions(self) -> Optional[Dict]:
         """
         PRIMARY: Extract speaker + text from live captions DOM.
@@ -213,6 +217,7 @@ class TranscriptExtractor:
             if not blocks:
                 return None
                 
+            # Get the LAST block (most recent caption)
             for block in reversed(blocks):
                 try:
                     # 1. Extract Speaker
@@ -231,37 +236,14 @@ class TranscriptExtractor:
                         # Fallback to the text container
                         text_containers = block.find_elements(By.CSS_SELECTOR, "div[class*='iOzk7'], div[class*='VpByLc']")
                         if text_containers:
-                            # If speaker is inside the same container, we need to strip it
                             raw_text = text_containers[-1].text.strip()
-                            if speaker:
-                                # Robust stripping: Check startswith, but also check if speaker is just present at start
-                                # Normalizing helps handle "Name\nText" vs "Name Text"
-                                if raw_text.startswith(speaker):
-                                    text = raw_text[len(speaker):].strip()
-                                elif raw_text.replace("\n", " ").startswith(speaker):
-                                     # Handle newline case manually if straight startswith failed
-                                     # This tries to remove the speaker length from the start regardless of separator
-                                     clean_raw = raw_text.replace("\n", " ")
-                                     if clean_raw.startswith(speaker):
-                                         # Be careful with indices here, raw_text has \n, speaker doesn't
-                                         # Heuristic: Find speaker in raw_text and slice after
-                                         idx = raw_text.find(speaker)
-                                         if idx == 0:
-                                             text = raw_text[len(speaker):].strip()
-                                         else:
-                                             text = raw_text
-                            
-                            if not text:
+                            if speaker and raw_text.startswith(speaker):
+                                text = raw_text[len(speaker):].strip()
+                            else:
                                 text = raw_text
                     
-                    if not text or text == self.last_caption_text:
+                    if not text:
                         continue
-                        
-                    # Ignore reflows (shorter text)
-                    if len(text) <= len(self.last_caption_text) and self.last_caption_text.startswith(text):
-                        continue
-
-                    self.last_caption_text = text
                     
                     # Fallback to active speaker if caption speaker missing
                     final_speaker = speaker or self._get_active_speaker_name() or "Unknown"
@@ -341,10 +323,7 @@ class TranscriptExtractor:
                         # Not stable yet, return previous
                         return self._last_active_speaker
                 else:
-                    # Same speaker, update timestamp to keep it fresh? 
-                    # No, we want to track when it *changed*.
-                    # Actually, if it's the same, we just return it.
-                    self._last_switch_ts = now # Reset switch timer as we are stable on this one
+                    self._last_switch_ts = now
                     return detected_speaker
             
             return self._last_active_speaker
@@ -385,139 +364,110 @@ class TranscriptExtractor:
             logger.debug(f"ARIA extraction error: {e}")
             return None
     
+    def _should_finalize_utterance(self) -> bool:
+        """Check if current utterance should be finalized."""
+        if not self.active_utterance or self.active_utterance.end_ms:
+            return False
+        
+        now = int(time.time() * 1000)
+        time_since_update = now - self.active_utterance.last_update_ms
+        
+        # Finalize if timeout exceeded
+        return time_since_update >= self.utterance_timeout_ms
+    
+    def _finalize_active_utterance(self):
+        """Finalize the current active utterance and move to events list."""
+        if not self.active_utterance:
+            return
+        
+        with self.lock:
+            self.active_utterance.finalize()
+            self.events.append(self.active_utterance)
+            logger.info(f"✅ Finalized: [{self.active_utterance.speaker}] {self.active_utterance.text[:60]}... (duration: {self.active_utterance.end_ms - self.active_utterance.start_ms}ms)")
+            
+            # Trigger callback for finalized utterance
+            if self.on_transcript:
+                self.on_transcript(self.active_utterance.speaker, self.active_utterance.text)
+            
+            self.active_utterance = None
+    
     def _poll_transcripts(self):
         """Main polling loop for transcript extraction."""
-        last_text = ""
         
         while self.running:
             try:
-                # Check for silence/finalization
-                with self.lock:
-                    if self.events:
-                        last_event = self.events[-1]
-                        if not last_event.end_ms:
-                            time_since_update = int(time.time() * 1000) - getattr(last_event, 'last_update_ts', 0)
-                            if time_since_update > 800:
-                                last_event.finalize()
-                                # logger.debug(f"Finalized event {last_event.id} due to silence")
-
+                # Check if we should finalize current utterance
+                if self._should_finalize_utterance():
+                    self._finalize_active_utterance()
+                
                 # 1. Try captions first (most reliable)
                 caption_data = self._extract_from_captions()
                 
                 if caption_data and caption_data.get("text"):
                     text = caption_data["text"]
                     speaker = caption_data.get("speaker") or "Unknown"
+                    confidence = caption_data.get("confidence", 0.95)
                     
-                    if text != last_text:
-                        last_text = text
-                        self._add_event(
-                            speaker=speaker,
-                            text=text,
-                            source="captions",
-                            confidence=caption_data.get("confidence", 0.95)
-                        )
+                    now = int(time.time() * 1000)
+                    
+                    with self.lock:
+                        # Check if we have an active utterance
+                        if self.active_utterance:
+                            # Same speaker - update existing utterance
+                            if self.active_utterance.speaker == speaker:
+                                # Only update if text is longer (progressive update)
+                                if len(text) > len(self.active_utterance.text):
+                                    logger.debug(f"📝 Updating: [{speaker}] {text[:60]}...")
+                                    self.active_utterance.text = text
+                                    self.active_utterance.last_update_ms = now
+                            else:
+                                # Different speaker - finalize old, start new
+                                self._finalize_active_utterance()
+                                self.active_utterance = TranscriptEvent(
+                                    speaker=speaker,
+                                    text=text,
+                                    source="captions",
+                                    speaker_id=self._get_speaker_id(speaker),
+                                    confidence=confidence,
+                                    start_ms=now
+                                )
+                                logger.info(f"🎤 New utterance: [{speaker}] {text[:60]}...")
+                        else:
+                            # No active utterance - create new one
+                            self.active_utterance = TranscriptEvent(
+                                speaker=speaker,
+                                text=text,
+                                source="captions",
+                                speaker_id=self._get_speaker_id(speaker),
+                                confidence=confidence,
+                                start_ms=now
+                            )
+                            logger.info(f"🎤 New utterance: [{speaker}] {text[:60]}...")
                 else:
-                    # 2. Try active speaker detection
+                    # 2. Try active speaker detection (for speaker changes)
                     active_speaker = self._get_active_speaker_name()
                     
-                    if active_speaker and active_speaker != self.current_speaker:
-                        self.current_speaker = active_speaker
-                        logger.debug(f"Active speaker changed: {active_speaker}")
-                        # Explicit speaker change event (if needed, but user asked for it)
-                        # { "type": "speaker_change", "speaker": "John" }
-                        # We can add an event with empty text or special flag?
-                        # The user said: Create explicit speaker-change events when no text is available.
-                        # But TranscriptEvent expects text.
-                        # I will add an event with empty text, but maybe mark source as 'speaker_change'?
-                        # Or just rely on the fact that it's a new event.
-                        # But if I add event with empty text, it might clutter.
-                        # However, the user explicitly asked for it.
-                        # "Create explicit speaker-change events when no text is available."
-                        # I'll add it.
-                        self._add_event(
-                            speaker=active_speaker,
-                            text="", 
-                            source="active_tile",
-                            confidence=0.6
-                        )
-                    
-                    # 3. Fallback to ARIA
-                    aria_data = self._extract_from_aria()
-                    if aria_data and aria_data.get("speaker"):
-                        self.current_speaker = aria_data["speaker"]
+                    if active_speaker and self.active_utterance:
+                        if active_speaker != self.active_utterance.speaker:
+                            # Speaker changed but no caption yet - finalize previous
+                            self._finalize_active_utterance()
+                            logger.debug(f"Speaker changed to: {active_speaker}")
                 
-                time.sleep(0.1)  # Poll every 100ms (was 700ms)
+                time.sleep(0.1)  # Poll every 100ms
                 
             except Exception as e:
                 logger.debug(f"Transcript poll error: {e}")
                 time.sleep(1)
-    
-    def _add_event(
-        self,
-        speaker: str,
-        text: str,
-        source: str = "captions",
-        role: str = "human",
-        confidence: float = 0.95
-    ):
-        """Add a new transcript event."""
-        with self.lock:
-            # Check if we should merge with previous event
-            if self.events:
-                last_event = self.events[-1]
-                
-                # Check for same speaker
-                if last_event.speaker == speaker:
-                    # CASE 1: Not finalized - normal merge
-                    if not last_event.end_ms:
-                        last_event.text = text  # Update with latest text
-                        last_event.last_update_ts = int(time.time() * 1000)
-                        
-                        # Trigger callback for updates too
-                        if self.on_transcript:
-                            self.on_transcript(speaker, text)
-                        return
-                    
-                    # CASE 2: Finalized but text is a prefix match (Fix for duplication)
-                    # Example: "I am snehal" -> "I am snehal i am a entrepreneur"
-                    
-                    # Normalized comparison (ignore whitespace differences)
-                    norm_last = self._normalize_text(last_event.text)
-                    norm_new = self._normalize_text(text)
-                    
-                    # Check if new text starts with old text
-                    if norm_new.startswith(norm_last) and len(norm_new) >= len(norm_last):
-                        logger.info(f"🔄 Merging finalized event overlap: '{last_event.text}' -> '{text}'")
-                        last_event.text = text
-                        last_event.end_ms = None  # Un-finalize to allow more updates
-                        last_event.last_update_ts = int(time.time() * 1000)
-                        
-                        if self.on_transcript:
-                            self.on_transcript(speaker, text)
-                        return
-            
-            # Create new event
-            event = TranscriptEvent(
-                speaker=speaker,
-                text=text,
-                source=source,
-                role=role,
-                speaker_id=self._get_speaker_id(speaker),
-                confidence=confidence
-            )
-            
-            self.events.append(event)
-            logger.info(f"📝 [{source}] {speaker}: {text[:50]}...")
-            
-            # Trigger callback for new event
-            if self.on_transcript:
-                self.on_transcript(speaker, text)
     
     def add_bot_utterance(self, text: str, start_ms: int = None, end_ms: int = None):
         """
         Add bot's own speech to transcript.
         Called by AudioOutput when bot speaks.
         """
+        # Finalize any active human utterance first
+        if self.active_utterance:
+            self._finalize_active_utterance()
+        
         with self.lock:
             event = TranscriptEvent(
                 speaker=self.bot_name,
@@ -532,7 +482,7 @@ class TranscriptExtractor:
                 event.finalize(end_ms)
             
             self.events.append(event)
-            logger.info(f"📝 [bot] {self.bot_name}: {text[:50]}...")
+            logger.info(f"🤖 Bot: {self.bot_name}: {text[:50]}...")
             
             # Trigger callback for bot utterance
             if self.on_transcript:
@@ -553,39 +503,46 @@ class TranscriptExtractor:
         # Start polling thread
         self.thread = threading.Thread(target=self._poll_transcripts, daemon=True)
         self.thread.start()
-        logger.info("🎙️ Transcript extraction started")
+        logger.info(f"🎙️ Transcript extraction started (timeout: {self.utterance_timeout_ms}ms)")
     
     def stop(self):
         """Stop transcript extraction."""
         self.running = False
+        
+        # Finalize any active utterance
+        if self.active_utterance:
+            self._finalize_active_utterance()
+        
         if self.thread:
             self.thread.join(timeout=2)
-        
-        # Finalize last event
-        with self.lock:
-            if self.events and not self.events[-1].end_ms:
-                self.events[-1].finalize()
         
         logger.info(f"🎙️ Transcript extraction stopped. {len(self.events)} events captured.")
     
     def get_transcript(self) -> Dict:
         """Get full transcript as dictionary."""
         with self.lock:
+            # Include active utterance if present
+            all_events = self.events.copy()
+            if self.active_utterance:
+                all_events.append(self.active_utterance)
+            
             return {
                 "meeting_id": self.meeting_id,
                 "meeting_start_ms": self.meeting_start_time,
                 "meeting_end_ms": int(time.time() * 1000),
                 "bot_name": self.bot_name,
                 "participants": list(self.speaker_map.keys()),
-                "event_count": len(self.events),
-                "events": [e.to_dict() for e in self.events]
+                "event_count": len(all_events),
+                "events": [e.to_dict() for e in all_events]
             }
     
     def save_transcript(self, filepath: str = None) -> str:
         """Save transcript to JSON file."""
         if not filepath:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            import os
             temp_dir = os.getenv("OUTPUT_DIR", "/tmp/cuemeet")
+            os.makedirs(temp_dir, exist_ok=True)
             filepath = os.path.join(temp_dir, f"transcript_{self.meeting_id}_{timestamp}.json")
         
         transcript = self.get_transcript()
