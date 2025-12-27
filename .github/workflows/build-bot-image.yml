@@ -33,8 +33,8 @@ jobs:
           file: Dockerfile
           push: true
           tags: |
-            ghcr.io/hicappyai/cuemeet-gmeet-bot:latest
-            ghcr.io/hicappyai/cuemeet-gmeet-bot:${{ github.sha }}
+            ghcr.io/hicappyai/voice:bot
+            ghcr.io/hicappyai/voice:${{ github.sha }}
           build-args: |
             ENABLE_VOICE=true
 
@@ -45,12 +45,12 @@ jobs:
           username: ubuntu
           key: ${{ secrets.EC2_SSH_KEY }}
           script: |
-            docker pull ghcr.io/hicappyai/cuemeet-gmeet-bot:latest
+            docker pull ghcr.io/hicappyai/voice:bot
 
-            docker stop cuemeet-gmeet-bot || true
-            docker rm cuemeet-gmeet-bot || true
+            docker stop voice-bot || true
+            docker rm voice-bot || true
 
             docker run -d \
-              --name cuemeet-gmeet-bot \
+              --name voice-bot \
               --restart unless-stopped \
-              ghcr.io/hicappyai/cuemeet-gmeet-bot:latest
+              ghcr.io/hicappyai/voice:bot
