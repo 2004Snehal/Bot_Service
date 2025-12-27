@@ -134,6 +134,10 @@ class TranscriptExtractor:
         # Current active utterance tracking
         self.active_utterance: Optional[TranscriptEvent] = None
         
+        # Track last finalized text to prevent duplicates
+        self.last_finalized_text: str = ""
+        self.last_caption_text: str = ""  # Last seen raw caption
+        
         self.running = False
         self.thread: Optional[threading.Thread] = None
         self.lock = threading.Lock()
@@ -196,6 +200,40 @@ class TranscriptExtractor:
             logger.error(f"Error enabling captions: {e}")
             return False
     
+    def _normalize_text(self, text: str) -> str:
+        """Normalize text for comparison (collapse whitespace, lowercase)."""
+        if not text:
+            return ""
+        return " ".join(text.lower().split())
+
+    def _is_text_duplicate(self, new_text: str, old_text: str) -> bool:
+        """
+        Check if new_text is a duplicate or subset of old_text.
+        Returns True if they're essentially the same.
+        """
+        if not new_text or not old_text:
+            return False
+        
+        norm_new = self._normalize_text(new_text)
+        norm_old = self._normalize_text(old_text)
+        
+        # Exact match
+        if norm_new == norm_old:
+            return True
+        
+        # New text is a prefix of old (caption reflow/truncation)
+        if norm_old.startswith(norm_new):
+            return True
+        
+        # New text is very similar (>90% overlap)
+        if len(norm_new) > 20:  # Only for substantial text
+            overlap = len(set(norm_new.split()) & set(norm_old.split()))
+            total = len(set(norm_new.split()) | set(norm_old.split()))
+            if total > 0 and (overlap / total) > 0.9:
+                return True
+        
+        return False
+
     def _extract_from_captions(self) -> Optional[Dict]:
         """
         PRIMARY: Extract speaker + text from live captions DOM.
@@ -244,6 +282,12 @@ class TranscriptExtractor:
                     
                     if not text:
                         continue
+                    
+                    # Skip if this is the same text we just saw
+                    if text == self.last_caption_text:
+                        return None
+                    
+                    self.last_caption_text = text
                     
                     # Fallback to active speaker if caption speaker missing
                     final_speaker = speaker or self._get_active_speaker_name() or "Unknown"
@@ -383,6 +427,10 @@ class TranscriptExtractor:
         with self.lock:
             self.active_utterance.finalize()
             self.events.append(self.active_utterance)
+            
+            # Store normalized version to prevent duplicates
+            self.last_finalized_text = self._normalize_text(self.active_utterance.text)
+            
             logger.info(f"✅ Finalized: [{self.active_utterance.speaker}] {self.active_utterance.text[:60]}... (duration: {self.active_utterance.end_ms - self.active_utterance.start_ms}ms)")
             
             # Trigger callback for finalized utterance
@@ -408,6 +456,12 @@ class TranscriptExtractor:
                     speaker = caption_data.get("speaker") or "Unknown"
                     confidence = caption_data.get("confidence", 0.95)
                     
+                    # CRITICAL: Check if this text is a duplicate of what we just finalized
+                    if self._is_text_duplicate(text, self.last_finalized_text):
+                        logger.debug(f"⏭️ Skipping duplicate text: {text[:60]}...")
+                        time.sleep(0.1)
+                        continue
+                    
                     now = int(time.time() * 1000)
                     
                     with self.lock:
@@ -416,13 +470,34 @@ class TranscriptExtractor:
                             # Same speaker - update existing utterance
                             if self.active_utterance.speaker == speaker:
                                 # Only update if text is longer (progressive update)
-                                if len(text) > len(self.active_utterance.text):
+                                norm_old = self._normalize_text(self.active_utterance.text)
+                                norm_new = self._normalize_text(text)
+                                
+                                if len(norm_new) > len(norm_old):
                                     logger.debug(f"📝 Updating: [{speaker}] {text[:60]}...")
                                     self.active_utterance.text = text
+                                    self.active_utterance.last_update_ms = now
+                                elif norm_new == norm_old:
+                                    # Same text, just update timestamp to keep alive
                                     self.active_utterance.last_update_ms = now
                             else:
                                 # Different speaker - finalize old, start new
                                 self._finalize_active_utterance()
+                                
+                                # Double-check against last finalized again after finalization
+                                if not self._is_text_duplicate(text, self.last_finalized_text):
+                                    self.active_utterance = TranscriptEvent(
+                                        speaker=speaker,
+                                        text=text,
+                                        source="captions",
+                                        speaker_id=self._get_speaker_id(speaker),
+                                        confidence=confidence,
+                                        start_ms=now
+                                    )
+                                    logger.info(f"🎤 New utterance: [{speaker}] {text[:60]}...")
+                        else:
+                            # No active utterance - create new one (if not duplicate)
+                            if not self._is_text_duplicate(text, self.last_finalized_text):
                                 self.active_utterance = TranscriptEvent(
                                     speaker=speaker,
                                     text=text,
@@ -432,17 +507,6 @@ class TranscriptExtractor:
                                     start_ms=now
                                 )
                                 logger.info(f"🎤 New utterance: [{speaker}] {text[:60]}...")
-                        else:
-                            # No active utterance - create new one
-                            self.active_utterance = TranscriptEvent(
-                                speaker=speaker,
-                                text=text,
-                                source="captions",
-                                speaker_id=self._get_speaker_id(speaker),
-                                confidence=confidence,
-                                start_ms=now
-                            )
-                            logger.info(f"🎤 New utterance: [{speaker}] {text[:60]}...")
                 else:
                     # 2. Try active speaker detection (for speaker changes)
                     active_speaker = self._get_active_speaker_name()
@@ -482,6 +546,10 @@ class TranscriptExtractor:
                 event.finalize(end_ms)
             
             self.events.append(event)
+            
+            # Update last finalized to prevent duplicate detection
+            self.last_finalized_text = self._normalize_text(text)
+            
             logger.info(f"🤖 Bot: {self.bot_name}: {text[:50]}...")
             
             # Trigger callback for bot utterance
