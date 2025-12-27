@@ -186,6 +186,12 @@ class TranscriptExtractor:
             logger.error(f"Error enabling captions: {e}")
             return False
     
+    def _normalize_text(self, text: str) -> str:
+        """Normalize text for comparison (collapse whitespace, lowercase)."""
+        if not text:
+            return ""
+        return " ".join(text.lower().split())
+
     def _extract_from_captions(self) -> Optional[Dict]:
         """
         PRIMARY: Extract speaker + text from live captions DOM.
@@ -227,9 +233,25 @@ class TranscriptExtractor:
                         if text_containers:
                             # If speaker is inside the same container, we need to strip it
                             raw_text = text_containers[-1].text.strip()
-                            if speaker and raw_text.startswith(speaker):
-                                text = raw_text[len(speaker):].strip()
-                            else:
+                            if speaker:
+                                # Robust stripping: Check startswith, but also check if speaker is just present at start
+                                # Normalizing helps handle "Name\nText" vs "Name Text"
+                                if raw_text.startswith(speaker):
+                                    text = raw_text[len(speaker):].strip()
+                                elif raw_text.replace("\n", " ").startswith(speaker):
+                                     # Handle newline case manually if straight startswith failed
+                                     # This tries to remove the speaker length from the start regardless of separator
+                                     clean_raw = raw_text.replace("\n", " ")
+                                     if clean_raw.startswith(speaker):
+                                         # Be careful with indices here, raw_text has \n, speaker doesn't
+                                         # Heuristic: Find speaker in raw_text and slice after
+                                         idx = raw_text.find(speaker)
+                                         if idx == 0:
+                                             text = raw_text[len(speaker):].strip()
+                                         else:
+                                             text = raw_text
+                            
+                            if not text:
                                 text = raw_text
                     
                     if not text or text == self.last_caption_text:
@@ -458,11 +480,13 @@ class TranscriptExtractor:
                     
                     # CASE 2: Finalized but text is a prefix match (Fix for duplication)
                     # Example: "I am snehal" -> "I am snehal i am a entrepreneur"
-                    clean_last = last_event.text.strip().lower()
-                    clean_new = text.strip().lower()
                     
-                    # Allow a small tolerance for minor punctuation/capitalization diffs via startswith
-                    if clean_new.startswith(clean_last) and len(clean_new) > len(clean_last):
+                    # Normalized comparison (ignore whitespace differences)
+                    norm_last = self._normalize_text(last_event.text)
+                    norm_new = self._normalize_text(text)
+                    
+                    # Check if new text starts with old text
+                    if norm_new.startswith(norm_last) and len(norm_new) >= len(norm_last):
                         logger.info(f"🔄 Merging finalized event overlap: '{last_event.text}' -> '{text}'")
                         last_event.text = text
                         last_event.end_ms = None  # Un-finalize to allow more updates
