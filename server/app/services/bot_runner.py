@@ -198,7 +198,8 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
             command = [
                 meetlink,
                 "--bot-name", bot_name,
-                "--min-record-time", str(min_record_time)
+                "--min-record-time", str(min_record_time),
+                "--speak", "true" if enable_speak else "false"
             ]
 
             container_name = f"bot_{bot_id}_{str(meeting_id)[:8]}"
