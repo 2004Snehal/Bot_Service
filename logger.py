@@ -14,6 +14,11 @@ class LogConfig:
             logging.getLogger('urllib3').setLevel(logging.WARNING)
             logging.getLogger('highlight_io').setLevel(logging.WARNING)
             
+            # Suppress OpenTelemetry spam when Highlight.io can't connect
+            logging.getLogger('opentelemetry').setLevel(logging.ERROR)
+            logging.getLogger('opentelemetry.sdk').setLevel(logging.ERROR)
+            logging.getLogger('opentelemetry.exporter').setLevel(logging.ERROR)
+            
             logger = logging.getLogger(logger_name)
             logger.setLevel(logging.DEBUG)
             

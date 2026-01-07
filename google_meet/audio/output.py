@@ -50,10 +50,14 @@ class AudioOutput:
         self.current_transcript = None
         self._speech_start_ms = None
         
-        # WAV file queue for Pipecat (receives complete WAV files)
-        self.wav_queue = []
-        self.wav_queue_lock = threading.Lock()
-        self.processing_wav = False
+        # Real-time PCM streaming for Pipecat (no file queue)
+        self.stream_active = False
+        self.stream_lock = threading.Lock()
+        self.pcm_buffer = []  # Buffer for incoming PCM frames
+        self.stream_sample_rate = int(os.getenv("PIPECAT_SAMPLE_RATE", "16000"))  # Default 16kHz
+        self.stream_channels = 1  # Mono
+        self.stream_process = None
+        self.stream_thread = None
 
         # Output tuning
         try:
@@ -67,10 +71,10 @@ class AudioOutput:
         self._log_available_devices()
         
         if self.speak_mode:
-            logger.info("🎤 AudioOutput in SPEAK MODE (Pipecat integration - WAV file mode)")
-            # Register callback with Pipecat to receive WAV files
+            logger.info(f"🎤 AudioOutput in SPEAK MODE (Pipecat PCM streaming @ {self.stream_sample_rate}Hz)")
+            # Register callback with Pipecat to receive PCM frames
             if self.speak_handler:
-                self.speak_handler.audio_output_callback = self.receive_pipecat_audio
+                self.speak_handler.audio_output_callback = self.receive_pipecat_pcm
         else:
             logger.info("🔇 AudioOutput in LEGACY MODE (Socket/Microservice)")
 
@@ -81,79 +85,234 @@ class AudioOutput:
         """Flag that bot has something to say."""
         self.bot_wants_to_speak = True
 
-    def receive_pipecat_audio(self, audio_data: bytes):
+    def receive_pipecat_pcm(self, pcm_data: bytes, sample_rate: int = None):
         """
-        Callback from Pipecat - receives complete WAV file as bytes.
-        Queue it for playback.
-        """
-        logger.info(f"📥 Received audio from Pipecat: {len(audio_data)} bytes")
+        Callback from Pipecat - receives raw PCM audio frames for streaming.
+        Streams directly to audio output without saving to disk.
         
-        # Save to temp file
-        temp_dir = tempfile.gettempdir()
-        filename = f"pipecat_audio_{uuid.uuid4()}.wav"
-        filepath = os.path.join(temp_dir, filename)
+        Args:
+            pcm_data: Raw PCM audio bytes (S16LE format expected)
+            sample_rate: Sample rate of the audio (if different from default)
+        """
+        if not pcm_data:
+            return
+            
+        # Update sample rate if provided
+        if sample_rate and sample_rate != self.stream_sample_rate:
+            logger.warning(f"⚠️ Sample rate mismatch! Expected {self.stream_sample_rate}, got {sample_rate}")
+            self.stream_sample_rate = sample_rate
+        
+        with self.stream_lock:
+            # Start streaming on first frame
+            if not self.stream_active:
+                logger.info(f"🎵 Starting PCM stream @ {self.stream_sample_rate}Hz, {len(pcm_data)} bytes")
+                self.stream_active = True
+                self.bot_wants_to_speak = True
+                self._speech_start_ms = int(time.time() * 1000)
+                
+                # Start playback thread
+                self.stream_thread = threading.Thread(target=self._stream_pcm_playback, daemon=True)
+                self.stream_thread.start()
+            
+            # Add frame to buffer
+            self.pcm_buffer.append(pcm_data)
+    
+    def _stream_pcm_playback(self):
+        """Stream PCM audio directly to output device as frames arrive."""
+        logger.info("🚀 PCM streaming thread started")
+        
+        # Wait for silence before starting playback
+        logger.info("⏳ Waiting for silence to start Pipecat stream...")
+        while True:
+            if not self.audio_state.human_speaking:
+                now = time.time()
+                silence_duration = 0
+                if self.audio_state.silence_start_time:
+                    silence_duration = now - self.audio_state.silence_start_time
+                
+                if silence_duration > 1.0:  # Shorter wait for streaming
+                    break
+            
+            time.sleep(0.05)
+        
+        self.is_playing = True
         
         try:
-            with open(filepath, "wb") as f:
-                f.write(audio_data)
-            
-            logger.info(f"💾 Saved Pipecat audio to: {filepath}")
-            
-            # Add to queue
-            with self.wav_queue_lock:
-                self.wav_queue.append(filepath)
-            
-            # Signal that bot wants to speak
-            self.bot_wants_to_speak = True
-            
-            # Start processing queue if not already processing
-            if not self.processing_wav:
-                threading.Thread(target=self._process_wav_queue, daemon=True).start()
-                
+            if platform.system().lower().startswith("linux"):
+                self._stream_pcm_linux()
+            else:
+                self._stream_pcm_windows()
         except Exception as e:
-            logger.error(f"❌ Failed to save Pipecat audio: {e}")
-
-    def _process_wav_queue(self):
-        """Process queued WAV files from Pipecat."""
-        self.processing_wav = True
-        
-        while True:
-            # Get next file from queue
-            with self.wav_queue_lock:
-                if not self.wav_queue:
-                    self.processing_wav = False
-                    break
-                filepath = self.wav_queue.pop(0)
+            logger.error(f"❌ PCM streaming failed: {e}", exc_info=True)
+        finally:
+            self.is_playing = False
+            with self.stream_lock:
+                self.stream_active = False
+                self.pcm_buffer.clear()
+            logger.info("✅ PCM streaming finished")
+    
+    def _stream_pcm_linux(self):
+        """Stream PCM to PulseAudio on Linux."""
+        try:
+            # Set up PulseAudio
+            subprocess.run(["pactl", "set-sink-mute", "BotMic", "0"], check=False)
+            subprocess.run(["pactl", "set-sink-volume", "BotMic", "100%"], check=False)
             
-            # Wait for silence before playing
-            logger.info("⏳ Waiting for silence to play Pipecat audio...")
-            while True:
-                if not self.audio_state.human_speaking:
-                    now = time.time()
-                    silence_duration = 0
-                    if self.audio_state.silence_start_time:
-                        silence_duration = now - self.audio_state.silence_start_time
+            # Start pacat process
+            cmd = [
+                "pacat",
+                "--format=s16le",
+                f"--rate={self.stream_sample_rate}",
+                f"--channels={self.stream_channels}",
+                "--device=BotMic",
+                "--latency-msec=50"  # Lower latency for streaming
+            ]
+            
+            logger.info(f"🚀 Starting pacat: {' '.join(cmd)}")
+            self.stream_process = subprocess.Popen(
+                cmd,
+                stdin=subprocess.PIPE,
+                stderr=subprocess.PIPE
+            )
+            
+            # Set default source
+            try:
+                sources_output = subprocess.run(
+                    ["pactl", "list", "short", "sources"],
+                    capture_output=True,
+                    text=True
+                ).stdout
+                
+                desired_source = None
+                if "BotMic.monitor" in sources_output:
+                    desired_source = "BotMic.monitor"
+                elif "MeetOutput.monitor" in sources_output:
+                    desired_source = "MeetOutput.monitor"
                     
-                    if silence_duration > 1.5:
+                if desired_source:
+                    subprocess.run(["pactl", "set-default-source", desired_source], check=False)
+                    logger.info(f"🎙️ Default source set to: {desired_source}")
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to adjust default source: {e}")
+            
+            logger.info(f"📡 Streaming PCM: rate={self.stream_sample_rate}Hz, channels={self.stream_channels}")
+            
+            # Stream frames as they arrive
+            frames_sent = 0
+            while True:
+                # Get next frame from buffer
+                pcm_frame = None
+                with self.stream_lock:
+                    if self.pcm_buffer:
+                        pcm_frame = self.pcm_buffer.pop(0)
+                    elif not self.stream_active:
+                        # No more frames and stream ended
                         break
                 
-                time.sleep(0.1)
+                if pcm_frame:
+                    try:
+                        # Apply output gain if needed
+                        if self.output_gain != 1.0:
+                            # Convert to numpy for gain
+                            audio_array = np.frombuffer(pcm_frame, dtype=np.int16).astype(np.float32)
+                            audio_array = audio_array / 32768.0  # Normalize to -1.0 to 1.0
+                            audio_array = np.clip(audio_array * self.output_gain, -1.0, 1.0)
+                            pcm_frame = (audio_array * 32767).astype(np.int16).tobytes()
+                        
+                        self.stream_process.stdin.write(pcm_frame)
+                        self.stream_process.stdin.flush()
+                        frames_sent += 1
+                        
+                        # Check for interruption
+                        if self.stop_requested:
+                            logger.info(f"🛑 Streaming interrupted after {frames_sent} frames")
+                            break
+                            
+                    except BrokenPipeError:
+                        logger.error("❌ pacat process died unexpectedly")
+                        break
+                else:
+                    # Wait for more frames
+                    time.sleep(0.01)
             
-            # Play the file
-            logger.info(f"▶️ Playing Pipecat audio: {filepath}")
-            self.wav_path = filepath
-            self.is_playing = True
+            logger.info(f"📊 Streamed {frames_sent} PCM frames to pacat")
             
-            try:
-                self._play_audio()
-            finally:
-                self.is_playing = False
-                # Clean up temp file
+        finally:
+            if self.stream_process:
                 try:
-                    os.remove(filepath)
-                    logger.info(f"🗑️ Cleaned up: {filepath}")
-                except Exception as e:
-                    logger.warning(f"Failed to delete temp file: {e}")
+                    self.stream_process.stdin.close()
+                    self.stream_process.wait(timeout=2)
+                except Exception:
+                    self.stream_process.kill()
+                self.stream_process = None
+    
+    def _stream_pcm_windows(self):
+        """Stream PCM to sounddevice on Windows."""
+        try:
+            # Find output device
+            device_id = None
+            devices = sd.query_devices()
+            for i, dev in enumerate(devices):
+                if self.device_name in dev['name'] and dev['max_output_channels'] > 0:
+                    device_id = i
+                    break
+            
+            if device_id is None:
+                logger.warning(f"Device '{self.device_name}' not found. Using default.")
+            else:
+                logger.info(f"Streaming to device: {devices[device_id]['name']} (ID: {device_id})")
+            
+            logger.info(f"📡 Streaming PCM: rate={self.stream_sample_rate}Hz, channels={self.stream_channels}")
+            
+            blocksize = 2048
+            
+            with sd.OutputStream(
+                samplerate=self.stream_sample_rate,
+                channels=self.stream_channels,
+                device=device_id,
+                blocksize=blocksize,
+                dtype='int16'
+            ) as stream:
+                frames_sent = 0
+                
+                while True:
+                    # Get next frame from buffer
+                    pcm_frame = None
+                    with self.stream_lock:
+                        if self.pcm_buffer:
+                            pcm_frame = self.pcm_buffer.pop(0)
+                        elif not self.stream_active:
+                            break
+                    
+                    if pcm_frame:
+                        # Convert bytes to numpy array
+                        audio_array = np.frombuffer(pcm_frame, dtype=np.int16)
+                        
+                        # Apply gain if needed
+                        if self.output_gain != 1.0:
+                            audio_float = audio_array.astype(np.float32) / 32768.0
+                            audio_float = np.clip(audio_float * self.output_gain, -1.0, 1.0)
+                            audio_array = (audio_float * 32767).astype(np.int16)
+                        
+                        # Ensure stereo if needed
+                        if self.stream_channels == 1 and len(audio_array.shape) == 1:
+                            audio_array = np.column_stack((audio_array, audio_array))
+                        
+                        stream.write(audio_array)
+                        frames_sent += 1
+                        
+                        # Check for interruption
+                        if self.stop_requested:
+                            logger.info(f"🛑 Streaming interrupted after {frames_sent} frames")
+                            break
+                    else:
+                        # Wait for more frames
+                        time.sleep(0.01)
+                
+                logger.info(f"📊 Streamed {frames_sent} PCM frames to sounddevice")
+                
+        except Exception as e:
+            logger.error(f"❌ Windows PCM streaming error: {e}", exc_info=True)
 
     def send_context_to_tts(self, bot_id, system_prompt, summary, recent_messages, user_message, force_tts=False):
         """
@@ -286,6 +445,12 @@ class AudioOutput:
         """Stop playback immediately."""
         self.stop_requested = True
         self.is_playing = False
+        
+        # Stop PCM streaming
+        with self.stream_lock:
+            if self.stream_active:
+                self.stream_active = False
+                logger.info("🛑 Stopping PCM stream")
 
     def pause(self):
         """Pause playback to be resumed later."""

@@ -4,7 +4,7 @@ from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.common.by import By
 
 
-def random_mouse_movements(self, duration_seconds=8):
+def random_mouse_movements(self, duration_seconds=3):
     """
     Perform random mouse movements within browser boundaries for a specified duration.
     

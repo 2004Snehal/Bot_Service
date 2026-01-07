@@ -9,12 +9,14 @@ import platform
 import subprocess
 import soundfile as sf
 import boto3
+import threading
 from botocore.exceptions import ClientError
 from datetime import datetime, timezone
 from threading import Event
 from groq import Groq
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.support.ui import WebDriverWait
@@ -128,14 +130,18 @@ class JoinGoogleMeet:
         self.conversation_summary = "Meeting just started."
 
         self.audio_state = AudioState()
-        self.vad = VAD()
+        self.vad = VAD(threshold=0.01)  # Adjust threshold as needed
         self.audio_buffer = AudioRingBuffer(max_seconds=10, sample_rate=16000, bytes_per_sample=2, channels=1)
+        
+        # VAD interrupt monitor thread
+        self.vad_monitor_running = False
+        self.vad_monitor_thread = None
         
         # Initialize Pipecat speak handler if enabled
         self.speak_handler = None
         if self.enable_speak:
             try:
-                from .speak import PipecatSpeakHandler
+                from .speak.pipecat_handler import PipecatSpeakHandler
                 
                 groq_api_key = os.getenv("GROQ_API_KEY")
                 deepgram_api_key = os.getenv("DEEPGRAM_API_KEY")
@@ -191,11 +197,29 @@ class JoinGoogleMeet:
         # Socket TTS removed - using Pipecat for voice
         self.transcript_extractor: TranscriptExtractor = None
 
-    def _handle_interruption_event(self, msg):
-        self.logger.info(f"🧠 Memory Update: {msg}")
-        self.recent_messages.append(f"System: {msg}")
-        if len(self.recent_messages) > 10:
-            self.recent_messages.pop(0)
+    def _handle_finalized_utterance(self, speaker: str, text: str, event):
+        """
+        Called when TranscriptExtractor finalizes an utterance.
+        This is called ONCE per complete utterance.
+        
+        1. Store to transcript (already stored by extractor)
+        2. Send to Pipecat for LLM processing (if it's not from bot)
+        """
+        self.logger.info(f"📝 Finalized: [{speaker}] {text[:60]}...")
+        
+        # Only process human utterances (skip bot's own speech)
+        if speaker != self.bot_name and self.enable_speak and self.speak_handler:
+            # Send to Pipecat for LLM → TTS
+            self.logger.info(f"🗣️ Sending to Pipecat: {text[:60]}...")
+            self.speak_handler.process_transcript(text)
+
+    def _handle_interruption_event(self, msg: str):
+        """
+        Called when bot speech is interrupted.
+        Log to transcript as system event.
+        """
+        self.logger.info(f"🛑 Interruption: {msg}")
+        # Optionally log interruptions to transcript as system events
 
     def _handle_bot_speech_event(self, transcript: str, start_ms: int, end_ms: int):
         if self.transcript_extractor and transcript:
@@ -206,34 +230,56 @@ class JoinGoogleMeet:
             )
             self.logger.info(f"📝 Bot speech logged to transcript: {transcript[:50]}...")
     
-    def _handle_pipecat_audio(self, audio_data: bytes):
+    def _handle_pipecat_audio(self, audio_data: bytes, sample_rate: int = 16000):
         """
-        Callback for Pipecat audio data.
-        Supports both raw PCM chunks and complete WAV files.
+        Callback for Pipecat audio data - receives raw PCM chunks with sample rate.
+        Routes directly to AudioOutput for real-time streaming.
         """
         try:
             if not audio_data:
                 return
-            if len(audio_data) >= 4 and audio_data[:4] == b"RIFF":
-                self.logger.info(f"📥 Pipecat WAV received: {len(audio_data)} bytes")
-                self.audio_out.receive_pipecat_audio(audio_data)
-            else:
-                self.logger.info(f"🎵 Pipecat PCM chunk: {len(audio_data)} bytes")
-                # If chunk-mode is in use and output supports streaming
-                if hasattr(self.audio_out, "push_audio_chunk"):
-                    self.audio_out.push_audio_chunk(audio_data)
-                else:
-                    # Fallback: wrap PCM into temporary WAV header for playback
-                    import wave, io
-                    buf = io.BytesIO()
-                    with wave.open(buf, 'wb') as w:
-                        w.setnchannels(1)
-                        w.setsampwidth(2)
-                        w.setframerate(16000)
-                        w.writeframes(audio_data)
-                    self.audio_out.receive_pipecat_audio(buf.getvalue())
+            
+            # Pass PCM data directly to audio output streaming
+            self.audio_out.receive_pipecat_pcm(audio_data, sample_rate)
+            
         except Exception as e:
             self.logger.error(f"Error handling Pipecat audio: {e}")
+
+    def _start_vad_monitor(self):
+        """
+        Monitor VAD and interrupt Pipecat when user speaks during bot speech.
+        This runs in a separate thread.
+        """
+        self.vad_monitor_running = True
+        
+        def monitor_loop():
+            while self.vad_monitor_running:
+                try:
+                    # Check if user is speaking AND bot is speaking
+                    if (self.audio_state.human_speaking and 
+                        self.speak_handler and 
+                        self.speak_handler.is_speaking):
+                        
+                        self.logger.info("🛑 User spoke during bot speech - INTERRUPTING")
+                        
+                        # Interrupt Pipecat
+                        self.speak_handler.interrupt()
+                        
+                        # Stop audio output
+                        self.audio_out.stop()
+                        
+                        # Brief pause to let user finish
+                        time.sleep(0.5)
+                    
+                    time.sleep(0.1)  # Check every 100ms
+                    
+                except Exception as e:
+                    self.logger.error(f"VAD monitor error: {e}")
+                    time.sleep(1)
+        
+        self.vad_monitor_thread = threading.Thread(target=monitor_loop, daemon=True)
+        self.vad_monitor_thread.start()
+        self.logger.info("✅ VAD interrupt monitor started")
 
     def bot_handle_user_message(self, text):
         import threading
@@ -341,7 +387,7 @@ class JoinGoogleMeet:
             self.logger.error(f"Failed to navigate to the meeting link: {e}")
             self.end_session()
         
-        random_mouse_movements(self, duration_seconds=10)
+        random_mouse_movements(self, duration_seconds=3)
 
         try:
             modals = self.browser.find_elements(By.XPATH, '//button[@jsname="IbE0S"]')
@@ -416,11 +462,16 @@ class JoinGoogleMeet:
             for selector in join_selectors:
                 try:
                     join_button = WebDriverWait(self.browser, 5).until(EC.element_to_be_clickable((By.XPATH, selector)))
-                    if join_button: break
-                except: continue
-            if join_button:
-                join_button.click()
-                self.logger.info(f"Clicked the Join button ({join_button.text}) successfully.")
+                    if join_button: 
+                        # Re-find element immediately before clicking to avoid stale reference
+                        time.sleep(0.5)
+                        fresh_button = self.browser.find_element(By.XPATH, selector)
+                        fresh_button.click()
+                        self.logger.info(f"Clicked the Join button successfully.")
+                        break
+                except Exception as e:
+                    self.logger.debug(f"Selector {selector} failed: {e}")
+                    continue
         except Exception as e:
             self.logger.error(f"Failed to click Join button: {e}")
         
@@ -526,7 +577,6 @@ class JoinGoogleMeet:
             self.browser.maximize_window()
             time.sleep(1)
             # Send F11 to go full screen (hides URL bar and tabs)
-            from selenium.webdriver.common.keys import Keys
             self.browser.find_element(By.TAG_NAME, "body").send_keys(Keys.F11)
             time.sleep(1)
         except:
@@ -595,26 +645,24 @@ class JoinGoogleMeet:
             if self.enable_transcript:
                 # Use callback to send transcripts directly to Pipecat when speak mode enabled
                 if self.enable_speak and self.speak_handler:
-                    def on_transcript_callback(speaker: str, text: str):
-                        """Callback when new transcript arrives from Google Meet captions."""
-                        # Only process non-bot utterances
-                        if speaker != self.bot_name and text.strip():
-                            self.logger.info(f"📝 Google Meet Caption: {speaker}: {text}")
-                            # Send directly to Pipecat without filtering
-                            self.logger.info(f"🗣️ Sending to Pipecat: {text}")
-                            self.speak_handler.process_transcript(text)
-                    
                     self.transcript_extractor = TranscriptExtractor(
-                        self.browser, 
-                        self.bot_name, 
-                        self.id,
-                        on_transcript=on_transcript_callback
+                        self.browser,
+                        bot_name=self.bot_name,
+                        meeting_id=self.id,
+                        on_utterance_finalized=self._handle_finalized_utterance,
+                        utterance_timeout_ms=2000  # 2 seconds silence = finalize
                     )
                     self.transcript_extractor.start()
                     self.logger.info("✅ Transcript extractor started (routing to Pipecat)")
                 else:
                     # Just extract transcripts without processing
-                    self.transcript_extractor = TranscriptExtractor(self.browser, self.bot_name, self.id)
+                    self.transcript_extractor = TranscriptExtractor(
+                        self.browser,
+                        bot_name=self.bot_name,
+                        meeting_id=self.id,
+                        on_utterance_finalized=None,  # No callback, just store
+                        utterance_timeout_ms=2000
+                    )
                     self.transcript_extractor.start()
                     self.logger.info("✅ Transcript extractor started (recording only)")
 

@@ -7,16 +7,34 @@ import platform
 import audioop # ✅ Added for RMS calculation
 import io
 import wave
-from deepgram import (
-    DeepgramClient,
-    DeepgramClientOptions,
-    LiveTranscriptionEvents,
-    LiveOptions,
-)
+
+# Initialize logger BEFORE imports that might fail
+logger = logging.getLogger(__name__)
+
+# Deepgram is optional - only used if bot_callback is provided (which it's not in current setup)
+try:
+    from deepgram import DeepgramClient
+    try:
+        # Try SDK v3+ path first
+        from deepgram.clients.live import LiveOptions, LiveTranscriptionEvents
+    except ImportError:
+        try:
+            # Try alternate v3+ path
+            from deepgram.live import LiveOptions, LiveTranscriptionEvents
+        except ImportError:
+            # SDK v2 path
+            from deepgram import LiveOptions, LiveTranscriptionEvents
+    DEEPGRAM_AVAILABLE = True
+    logger.info("✅ Deepgram SDK loaded successfully")
+except ImportError as e:
+    logger.warning(f"⚠️ Deepgram SDK not available: {e}")
+    DEEPGRAM_AVAILABLE = False
+    DeepgramClient = None
+    LiveOptions = None
+    LiveTranscriptionEvents = None
+
 from .buffer import AudioRingBuffer
 from .vad import VAD
-
-logger = logging.getLogger(__name__)
 
 class AudioState:
     def __init__(self):
@@ -114,7 +132,7 @@ class AudioInput:
                     smart_format=True,
                     encoding="linear16",
                     channels=1,
-                    sample_rate=16000,
+                    sample_rate=24000,
                     interim_results=True,
                     vad_events=True,
                     punctuate=True
@@ -168,14 +186,20 @@ class AudioInput:
 
         self.running = True
         
-        # Initialize Deepgram Streaming Connection in a separate thread
-        if self.deepgram_client:
+        # Initialize Deepgram Streaming Connection ONLY if bot_callback is provided
+        # When bot_callback=None, we only use this for VAD monitoring
+        if self.deepgram_client and self.bot_callback:
             logger.info("🔌 Starting Deepgram Streaming connection...")
             self.dg_thread = threading.Thread(target=self._deepgram_connection_thread, daemon=True)
             self.dg_thread.start()
             
             # Wait a moment for connection to establish
             time.sleep(1)
+        else:
+            if not self.bot_callback:
+                logger.info("⏩ Skipping Deepgram STT (bot_callback=None, VAD-only mode)")
+            else:
+                logger.warning("⚠️ Deepgram client not available")
 
         if not self.process:
             # FFmpeg command to capture audio
@@ -259,22 +283,15 @@ class AudioInput:
                 is_speech = self.vad.is_speaking(chunk)
                 now = time.time()
                 
-                # 3. Update State & Send to Deepgram
+                # 3. Update State (VAD only - no transcription)
                 if is_speech:
                     # Log when speech is first detected
                     if not self.audio_state.human_speaking:
-                        logger.info("🗣️ Speech DETECTED - Sending to Deepgram")
+                        logger.debug("🗣️ Speech detected (VAD)")
                     
                     self.audio_state.human_speaking = True
                     self.audio_state.last_speech_time = now
                     self.audio_state.silence_start_time = None
-                    
-                    # Send to Deepgram Streaming (v3 API uses send)
-                    if self.dg_connection and self._dg_connected:
-                        try:
-                            self.dg_connection.send(chunk)
-                        except Exception as e:
-                            logger.debug(f"Error sending to Deepgram: {e}")
                     
                 else:
                     if self.audio_state.silence_start_time is None:
@@ -283,18 +300,8 @@ class AudioInput:
                     # If silence > 0.5s (short pause), we can consider human stopped speaking
                     if now - self.audio_state.last_speech_time > 0.5:
                         if self.audio_state.human_speaking:
-                            logger.info("🔇 Speech ENDED - Silence detected")
+                            logger.debug("🔇 Silence detected (VAD)")
                         self.audio_state.human_speaking = False
-
-                    # Still send to Deepgram if we want to catch trailing speech or if VAD is aggressive
-                    # For now, let's send everything to Deepgram if we are in a "speaking session" 
-                    # or just rely on Deepgram's VAD.
-                    # To be safe and simple: Send EVERYTHING to Deepgram and let it handle VAD/Silence.
-                    if self.dg_connection and self._dg_connected:
-                        try:
-                            self.dg_connection.send(chunk)
-                        except Exception as e:
-                            logger.debug(f"Error sending to Deepgram: {e}")
 
             except Exception as e:
                 logger.error(f"Error in audio reader loop: {e}")

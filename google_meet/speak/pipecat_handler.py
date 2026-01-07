@@ -1,21 +1,148 @@
 """
-STREAMING voice handler - Lower latency, optimized costs
-Uses:
-- Streaming Groq API (text arrives word-by-word)
-- Streaming Deepgram TTS (audio starts immediately)
-- Caption debouncing (reduces API calls)
+Pipecat Voice Pipeline - Real Framework Integration
+Auto-detects LLM and TTS providers based on available API keys
+Easy provider swapping by just changing API key env vars
 """
 
+import os
 import asyncio
 import logging
 import threading
-import aiohttp
 import time
-import json
-from typing import Optional, Callable, Any
+from typing import Optional, Callable, AsyncGenerator
 
 logger = logging.getLogger(__name__)
 
+# Try to import Pipecat
+try:
+    from pipecat.frames.frames import (
+        Frame,
+        TextFrame,
+        LLMMessagesFrame,
+        EndFrame,
+        AudioRawFrame,
+        TTSStartedFrame,
+        TTSStoppedFrame,
+        TTSAudioRawFrame,
+        ErrorFrame,
+        LLMFullResponseStartFrame,
+        LLMFullResponseEndFrame,
+    )
+    from pipecat.pipeline.pipeline import Pipeline
+    from pipecat.pipeline.task import PipelineParams, PipelineTask
+    from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
+    from pipecat.services.ai_services import TTSService
+    
+    # Core LLM/TTS Services (only import what we actually use)
+    from pipecat.services.groq import GroqLLMService
+    
+    # Import Deepgram SDK directly for custom TTS
+    from deepgram import DeepgramClient, SpeakOptions
+    
+    # Optional services - set to None, will import on demand if needed
+    OpenAILLMService = None
+    AnthropicLLMService = None
+    ElevenLabsTTSService = None  
+    GoogleTTSService = None
+    
+    PIPECAT_AVAILABLE = True
+    logger.info("✅ Pipecat framework loaded successfully")
+except ImportError as e:
+    PIPECAT_AVAILABLE = False
+    logger.error(f"❌ Pipecat not available: {e}")
+
+
+# Custom Deepgram TTS Service to fix SDK version incompatibility
+# The built-in pipecat DeepgramTTSService expects response.stream_memory
+# but Deepgram SDK v3.4.0 uses response.stream instead
+class CustomDeepgramTTSService(TTSService):
+    """Custom Deepgram TTS Service compatible with Deepgram SDK v3.4.0"""
+    
+    def __init__(
+        self,
+        *,
+        api_key: str,
+        voice: str = "aura-asteria-en",
+        sample_rate: int = 24000,
+        encoding: str = "linear16",
+        **kwargs,
+    ):
+        super().__init__(sample_rate=sample_rate, **kwargs)
+        
+        self._settings = {
+            "sample_rate": sample_rate,
+            "encoding": encoding,
+        }
+        self._voice = voice
+        self.set_voice(voice)
+        self._deepgram_client = DeepgramClient(api_key=api_key)
+        logger.info(f"🔊 CustomDeepgramTTSService initialized (voice: {voice}, sample_rate: {sample_rate})")
+    
+    def can_generate_metrics(self) -> bool:
+        return True
+    
+    async def run_tts(self, text: str) -> AsyncGenerator[Frame, None]:
+        logger.info(f"🎤 CustomDeepgramTTS: Generating audio for: [{text[:50]}...]")
+        
+        options = SpeakOptions(
+            model=self._voice_id,
+            encoding=self._settings["encoding"],
+            sample_rate=self._settings["sample_rate"],
+            container="none",
+        )
+        
+        try:
+            await self.start_ttfb_metrics()
+            
+            logger.debug(f"🔊 Calling Deepgram speak API...")
+            response = await asyncio.to_thread(
+                self._deepgram_client.speak.rest.v("1").stream,
+                {"text": text},
+                options
+            )
+            
+            await self.start_tts_usage_metrics(text)
+            yield TTSStartedFrame()
+            
+            # FIX: Use response.stream instead of response.stream_memory (SDK v3.4.0)
+            audio_buffer = response.stream
+            
+            if audio_buffer is None:
+                logger.error("❌ No audio data received from Deepgram")
+                raise ValueError("No audio data received from Deepgram")
+            
+            logger.info(f"✅ Deepgram returned audio buffer (type: {type(audio_buffer).__name__})")
+            
+            # Read and yield audio data in chunks
+            audio_buffer.seek(0)
+            chunk_size = 8192
+            total_bytes = 0
+            chunk_count = 0
+            
+            while True:
+                await self.stop_ttfb_metrics()
+                chunk = audio_buffer.read(chunk_size)
+                if not chunk:
+                    break
+                total_bytes += len(chunk)
+                chunk_count += 1
+                
+                frame = TTSAudioRawFrame(
+                    audio=chunk,
+                    sample_rate=self._settings["sample_rate"],
+                    num_channels=1
+                )
+                yield frame
+            
+            logger.info(f"✅ TTS complete: {chunk_count} chunks, {total_bytes} bytes")
+            yield TTSStoppedFrame()
+            
+        except Exception as e:
+            logger.exception(f"❌ CustomDeepgramTTS exception: {e}")
+            yield ErrorFrame(f"TTS Error: {str(e)}")
+
+
+# Base system prompt
 BASE_PROMPT = """You are a real-time conversational voice assistant participating in a live meeting.
 
 Your primary goal is to communicate clearly, concisely, and naturally through speech.
@@ -54,48 +181,158 @@ Additional instructions from the user:
 {user_prompt}
 """
 
-try:
-    from pipecat.frames.frames import AudioRawFrame
-    PIPECAT_AVAILABLE = True
-except ImportError:
-    logger.warning("Pipecat not installed. Voice features disabled.")
-    PIPECAT_AVAILABLE = False
+
+class AudioOutputProcessor(FrameProcessor):
+    """Custom processor to intercept audio frames and stream directly to callback
+    
+    Key design: NO BUFFERING - audio frames go directly to playback for real-time speech.
+    This enables proper interruption handling.
+    """
+    
+    def __init__(self, audio_callback: Callable[[bytes, int], None]):
+        super().__init__()
+        self.audio_callback = audio_callback
+        self._frame_count = 0
+        self._is_tts_active = False
+        self._interrupted = False
+        self._total_audio_bytes = 0
+        self._sample_rate = 24000  # Default Deepgram rate, will update from frames
+    
+    @property
+    def is_speaking(self) -> bool:
+        """Check if TTS is currently active (for VAD interruption logic)"""
+        return self._is_tts_active
+    
+    def set_interrupted(self, interrupted: bool = True):
+        """Signal that playback was interrupted - stop forwarding audio"""
+        self._interrupted = interrupted
+        if interrupted:
+            logger.info("🛑 AudioOutputProcessor: Interruption signaled - dropping audio frames")
+    
+    def clear_interrupted(self):
+        """Clear interruption state for new utterance"""
+        self._interrupted = False
+    
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        # Log all frames for debugging
+        self._frame_count += 1
+        frame_type = type(frame).__name__
+        
+        # Log important frames always
+        if frame_type in ['TextFrame', 'AudioRawFrame', 'TTSAudioRawFrame', 'TTSStartedFrame', 'TTSStoppedFrame', 
+                          'LLMFullResponseStartFrame', 'LLMFullResponseEndFrame', 'ErrorFrame', 'EndFrame']:
+            logger.info(f"🔄 Frame #{self._frame_count}: {frame_type}")
+        elif self._frame_count <= 20 or self._frame_count % 100 == 0:
+            logger.debug(f"🔄 Frame #{self._frame_count}: {frame_type}")
+        
+        # Track TTS state
+        if isinstance(frame, TTSStartedFrame):
+            self._is_tts_active = True
+            self._interrupted = False  # Clear interruption for new utterance
+            self._total_audio_bytes = 0
+            logger.info("🔊 TTS Started - streaming audio directly")
+        
+        elif isinstance(frame, TTSStoppedFrame):
+            self._is_tts_active = False
+            logger.info(f"🔊 TTS Stopped - streamed {self._total_audio_bytes} bytes total")
+        
+        # Handle EndFrame (interruption)
+        if isinstance(frame, EndFrame):
+            self._is_tts_active = False
+            self._interrupted = True
+            logger.info("🛑 EndFrame received - stopping audio output")
+        
+        # STREAM AUDIO DIRECTLY - no buffering!
+        # This is critical for real-time playback and interruption
+        if isinstance(frame, (AudioRawFrame, TTSAudioRawFrame)):
+            if self._interrupted:
+                # Drop audio frames after interruption
+                logger.debug(f"🗑️ Dropping audio frame (interrupted)")
+                return  # Don't forward or process
+            
+            audio_bytes = None
+            sample_rate = self._sample_rate  # Default
+            
+            if hasattr(frame, 'audio'):
+                audio_bytes = frame.audio
+            elif hasattr(frame, 'data'):
+                audio_bytes = frame.data
+            
+            # Get sample rate from frame if available
+            if hasattr(frame, 'sample_rate') and frame.sample_rate:
+                sample_rate = frame.sample_rate
+                if sample_rate != self._sample_rate:
+                    logger.info(f"📊 Sample rate updated: {self._sample_rate} → {sample_rate}Hz")
+                    self._sample_rate = sample_rate
+            
+            if audio_bytes and self.audio_callback:
+                self._total_audio_bytes += len(audio_bytes)
+                # Stream directly to callback - NO BUFFERING
+                # Pass sample rate so output.py can handle rate conversion if needed
+                logger.debug(f"🎵 Streaming {len(audio_bytes)} bytes @ {sample_rate}Hz")
+                self.audio_callback(audio_bytes, sample_rate)
+        
+        # Log text frames from LLM
+        if isinstance(frame, TextFrame):
+            text = getattr(frame, 'text', '')
+            if text:
+                logger.info(f"💬 TextFrame: '{text[:100]}...'" if len(text) > 100 else f"💬 TextFrame: '{text}'")
+        
+        # Forward frames (except dropped audio)
+        if not (isinstance(frame, (AudioRawFrame, TTSAudioRawFrame)) and self._interrupted):
+            await self.push_frame(frame, direction)
 
 
 class PipecatSpeakHandler:
+    """
+    Pipecat-based voice handler with auto-detection of providers
+    
+    LLM Priority: Groq > OpenAI > Anthropic (based on API key availability)
+    TTS Priority: Deepgram > ElevenLabs > Google > OpenAI
+    
+    Change provider by setting different API keys in environment
+    """
+    
     def __init__(
         self,
         system_prompt: str,
-        groq_api_key: str,
-        deepgram_api_key: str,
-        audio_output_callback: Optional[Callable] = None,
-        model: str = "llama-3.1-8b-instant",
+        groq_api_key: str = None,
+        deepgram_api_key: str = None,
+        audio_output_callback: Optional[Callable[[bytes], None]] = None,
+        model: str = None,
         caption_debounce_ms: int = 2000,
     ):
         if not PIPECAT_AVAILABLE:
-            raise ImportError("Pipecat not installed")
-
+            raise ImportError("Pipecat framework not installed. Install with: pip install 'pipecat-ai[deepgram,groq]'")
+        
+        # Build full system prompt
         self.full_system_prompt = BASE_PROMPT.format(
             user_prompt=system_prompt.replace("{", "").replace("}", "")
         )
-
-        self.audio_output_callback = audio_output_callback
-        self.model = model
-        self.caption_debounce_ms = caption_debounce_ms
-
+        
+        # Store config for later service creation (in async context)
         self.groq_api_key = groq_api_key
         self.deepgram_api_key = deepgram_api_key
-
-        # Message history
-        self.messages = [{"role": "system", "content": self.full_system_prompt}]
-        self.messages_lock = threading.Lock()
-
+        self.model = model
+        self.audio_output_callback = audio_output_callback
+        self.caption_debounce_ms = caption_debounce_ms
+        
+        # Pipecat components (services created later in async context)
+        self.llm_service = None
+        self.tts_service = None
+        self._pipeline: Optional[Pipeline] = None
+        self._task: Optional[PipelineTask] = None
         self._event_loop: Optional[asyncio.AbstractEventLoop] = None
         self._pipeline_thread: Optional[threading.Thread] = None
+        self._audio_processor: Optional[AudioOutputProcessor] = None  # Reference for interruption
+        
+        # State
         self._is_running = False
         self._pipeline_ready = threading.Event()
+        self._messages = [{"role": "system", "content": self.full_system_prompt}]
+        self._messages_lock = threading.Lock()
         
-        # Caption debouncing
+        # Debouncing
         self._last_caption_text = ""
         self._debounce_timer: Optional[threading.Timer] = None
         self._debounce_lock = threading.Lock()
@@ -104,58 +341,195 @@ class PipecatSpeakHandler:
         self._last_response_at = 0
         self._requests_made = 0
         self._requests_failed = 0
-        self._total_llm_tokens = 0
-        self._total_tts_chars = 0
-
-        logger.info(f"✅ Handler initialized (STREAMING mode, Model: {model}, Debounce: {caption_debounce_ms}ms)")
-
+        
+        logger.info(f"✅ Pipecat handler initialized")
+    
+    def _create_llm_service(self, groq_api_key: str = None, model: str = None):
+        """Auto-detect and create LLM service based on available API keys"""
+        
+        # Try Groq first (fastest, cheapest)
+        groq_key = groq_api_key or os.getenv("GROQ_API_KEY")
+        if groq_key:
+            model = model or os.getenv("GROQ_MODEL", "llama-3.1-8b-instant")
+            logger.info(f"🤖 Using Groq LLM (model: {model})")
+            return GroqLLMService(
+                api_key=groq_key,
+                model=model,
+            )
+        
+        # Try OpenAI
+        if OpenAILLMService:
+            openai_key = os.getenv("OPENAI_API_KEY")
+            if openai_key:
+                model = model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+                logger.info(f"🤖 Using OpenAI LLM (model: {model})")
+                return OpenAILLMService(
+                    api_key=openai_key,
+                    model=model,
+                )
+        
+        # Try Anthropic
+        if AnthropicLLMService:
+            anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+            if anthropic_key:
+                model = model or os.getenv("ANTHROPIC_MODEL", "claude-3-haiku-20240307")
+                logger.info(f"🤖 Using Anthropic LLM (model: {model})")
+                return AnthropicLLMService(
+                    api_key=anthropic_key,
+                    model=model,
+                )
+        
+        raise ValueError(
+            "No LLM API key found. Set one of: GROQ_API_KEY, OPENAI_API_KEY, or ANTHROPIC_API_KEY"
+        )
+    
+    def _create_tts_service(self, deepgram_api_key: str = None):
+        """Auto-detect and create TTS service based on available API keys"""
+        
+        # Try Deepgram first (best quality/price ratio) - using custom service for SDK v3.4.0 compatibility
+        dg_key = deepgram_api_key or os.getenv("DEEPGRAM_API_KEY")
+        if dg_key:
+            voice = os.getenv("DEEPGRAM_VOICE", "aura-asteria-en")
+            # Use 16kHz to match bot's audio input (standard for Google Meet)
+            sample_rate = int(os.getenv("PIPECAT_SAMPLE_RATE", "16000"))
+            logger.info(f"🔊 Using CustomDeepgramTTSService (voice: {voice}, rate: {sample_rate}Hz)")
+            return CustomDeepgramTTSService(
+                api_key=dg_key,
+                voice=voice,
+                sample_rate=sample_rate,
+            )
+        
+        # Try ElevenLabs (highest quality)
+        if ElevenLabsTTSService:
+            elevenlabs_key = os.getenv("ELEVENLABS_API_KEY")
+            if elevenlabs_key:
+                voice_id = os.getenv("ELEVENLABS_VOICE", "21m00Tcm4TlvDq8ikWAM")  # Rachel
+                logger.info(f"🔊 Using ElevenLabs TTS (voice: {voice_id})")
+                return ElevenLabsTTSService(
+                    api_key=elevenlabs_key,
+                    voice_id=voice_id,
+                )
+        
+        # Try Google TTS (free tier available)
+        if GoogleTTSService:
+            # Google TTS uses ADC (Application Default Credentials)
+            google_creds = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+            if google_creds:
+                voice = os.getenv("GOOGLE_TTS_VOICE", "en-US-Neural2-F")
+                logger.info(f"🔊 Using Google TTS (voice: {voice})")
+                return GoogleTTSService(
+                    voice_name=voice,
+                )
+        
+        # Try OpenAI TTS
+        if OpenAILLMService:  # Same package
+            openai_key = os.getenv("OPENAI_API_KEY")
+            if openai_key:
+                voice = os.getenv("OPENAI_TTS_VOICE", "nova")
+                logger.info(f"🔊 Using OpenAI TTS (voice: {voice})")
+                # OpenAI TTS service (if available in pipecat)
+                try:
+                    from pipecat.services.openai import OpenAITTSService
+                    return OpenAITTSService(
+                        api_key=openai_key,
+                        voice=voice,
+                    )
+                except ImportError:
+                    pass
+        
+        raise ValueError(
+            "No TTS API key found. Set one of: DEEPGRAM_API_KEY, ELEVENLABS_API_KEY, "
+            "GOOGLE_APPLICATION_CREDENTIALS, or OPENAI_API_KEY"
+        )
+    
     def start(self):
+        """Start the Pipecat pipeline in a background thread"""
         if self._is_running:
             return
-
+        
         self._is_running = True
         self._pipeline_thread = threading.Thread(
-            target=self._run_pipeline_thread, daemon=True
+            target=self._run_pipeline_thread,
+            daemon=True
         )
         self._pipeline_thread.start()
         
+        # Give thread a moment to create event loop
+        time.sleep(0.1)
+        
         if not self._pipeline_ready.wait(timeout=10):
             self._is_running = False
-            raise Exception("Service failed to start")
+            raise Exception("Pipeline failed to start")
         
-        logger.info("✅ Service ready")
-
+        logger.info("✅ Pipecat pipeline ready")
+    
     def _run_pipeline_thread(self):
-        self._event_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._event_loop)
-
+        """Run Pipecat pipeline in its own event loop"""
         try:
-            self._event_loop.run_until_complete(self._run_services())
+            # Create new event loop for this thread
+            self._event_loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(self._event_loop)
+            
+            # Run the pipeline
+            self._event_loop.run_until_complete(self._run_pipeline())
         except Exception as e:
-            logger.error("❌ Service error", exc_info=e)
+            logger.error(f"❌ Pipeline thread error: {e}", exc_info=True)
+            self._pipeline_ready.set()  # Unblock start() even on error
         finally:
             try:
-                if hasattr(self, '_session') and self._session:
-                    self._event_loop.run_until_complete(self._session.close())
+                if self._event_loop:
+                    self._event_loop.close()
             except Exception:
                 pass
-            self._event_loop.close()
-
-    async def _run_services(self):
-        """Initialize aiohttp session"""
-        logger.info("🚀 Starting services...")
-        self._session = aiohttp.ClientSession()
-        self._pipeline_ready.set()
-        logger.info("✅ Services ready")
-        
-        # Keep event loop alive
-        while self._is_running:
-            await asyncio.sleep(1)
-
+    
+    async def _run_pipeline(self):
+        """Build and run the Pipecat pipeline"""
+        try:
+            # Create services NOW (inside async context where event loop exists)
+            logger.info("🔧 Creating Pipecat services...")
+            self.llm_service = self._create_llm_service(self.groq_api_key, self.model)
+            self.tts_service = self._create_tts_service(self.deepgram_api_key)
+            
+            # Create audio processor and store reference for interruption
+            self._audio_processor = AudioOutputProcessor(self.audio_output_callback)
+            
+            # SIMPLIFIED pipeline: LLM → TTS → Audio Output
+            # The LLM service receives LLMMessagesFrame and outputs TextFrames
+            # The TTS service receives TextFrames and outputs AudioRawFrames
+            # The audio processor intercepts audio and sends to callback
+            self._pipeline = Pipeline([
+                self.llm_service,     # Receives LLMMessagesFrame → outputs TextFrame
+                self.tts_service,     # Receives TextFrame → outputs AudioRawFrame
+                self._audio_processor,  # Streams audio directly to callback (no buffering)
+            ])
+            
+            # Create task without PipelineRunner to avoid signal handler issues
+            params = PipelineParams(
+                enable_metrics=True,
+                enable_usage_metrics=True,
+            )
+            
+            self._task = PipelineTask(
+                self._pipeline,
+                params=params,
+            )
+            
+            logger.info("✅ Pipeline built: LLM → TTS → AudioOutput")
+            self._pipeline_ready.set()
+            
+            # Start the task properly - run() blocks and processes frames
+            logger.info("🚀 Starting pipeline task.run()...")
+            await self._task.run()
+            logger.info("🏁 Pipeline task.run() completed")
+            
+        except Exception as e:
+            logger.error(f"❌ Pipeline build/run error: {e}", exc_info=True)
+            self._pipeline_ready.set()  # Unblock even on error
+    
     def process_transcript(self, text: str, speaker: str = "User"):
         """Process transcript with debouncing"""
         if not self._is_running or not self._pipeline_ready.is_set():
-            logger.warning("⚠️ Services not ready")
+            logger.warning("⚠️ Pipeline not ready")
             return
         
         # Debounce
@@ -170,9 +544,9 @@ class PipecatSpeakHandler:
                 self._process_debounced_transcript
             )
             self._debounce_timer.start()
-
+    
     def _process_debounced_transcript(self):
-        """Process after debounce"""
+        """Process after debounce expires"""
         with self._debounce_lock:
             text = self._last_caption_text
             self._debounce_timer = None
@@ -181,162 +555,51 @@ class PipecatSpeakHandler:
             return
         
         logger.info(f"📤 Processing: '{text[:80]}...'")
+        self._requests_made += 1
         
-        # Add to message history
-        with self.messages_lock:
-            self.messages.append({"role": "user", "content": text})
-        
-        # Call LLM and TTS in event loop
-        if self._event_loop:
-            asyncio.run_coroutine_threadsafe(
-                self._process_with_streaming_llm_and_tts(), self._event_loop
-            )
-
-    async def _process_with_streaming_llm_and_tts(self):
-        """
-        STREAMING: Call Groq API with streaming, accumulate sentences,
-        then send each sentence to TTS as it completes.
-        This gives much lower latency than waiting for full response.
-        """
+        # Send to pipeline - check event loop is still alive
+        if self._event_loop and self._task and not self._event_loop.is_closed():
+            try:
+                future = asyncio.run_coroutine_threadsafe(
+                    self._send_text_to_pipeline(text),
+                    self._event_loop
+                )
+                # Don't wait for completion to avoid blocking
+            except RuntimeError as e:
+                logger.error(f"❌ Event loop error: {e}")
+                self._requests_failed += 1
+        else:
+            logger.warning("⚠️ Pipeline not available for processing")
+            self._requests_failed += 1
+    
+    async def _send_text_to_pipeline(self, text: str):
+        """Send text frame to Pipecat pipeline"""
         try:
-            self._requests_made += 1
+            # Build messages list with system prompt + user message
+            with self._messages_lock:
+                messages = [
+                    {"role": "system", "content": self.full_system_prompt},
+                    {"role": "user", "content": text}
+                ]
             
-            # Get messages snapshot
-            with self.messages_lock:
-                messages = self.messages.copy()
+            # Create LLM messages frame with full context
+            frame = LLMMessagesFrame(messages)
             
-            logger.info(f"🤖 Calling Groq API (STREAMING) with {len(messages)} messages...")
+            logger.info(f"📨 Sending LLMMessagesFrame to pipeline with {len(messages)} messages")
             
-            # Call Groq API with streaming
-            async with self._session.post(
-                "https://api.groq.com/openai/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.groq_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={
-                    "model": self.model,
-                    "messages": messages,
-                    "temperature": 0.7,
-                    "max_tokens": 200,
-                    "stream": True,  # ← STREAMING ENABLED
-                }
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise Exception(f"Groq API error {response.status}: {error_text}")
-                
-                # Process streaming response
-                full_response = ""
-                sentence_buffer = ""
-                
-                async for line in response.content:
-                    line = line.decode('utf-8').strip()
-                    if not line or line == "data: [DONE]":
-                        continue
-                    
-                    if line.startswith("data: "):
-                        try:
-                            data = json.loads(line[6:])
-                            if "choices" in data and len(data["choices"]) > 0:
-                                delta = data["choices"][0].get("delta", {})
-                                content = delta.get("content", "")
-                                
-                                if content:
-                                    full_response += content
-                                    sentence_buffer += content
-                                    
-                                    # Check if we have a complete sentence
-                                    # (ends with . ! ? or has multiple sentences)
-                                    if any(punct in sentence_buffer for punct in ['. ', '! ', '? ', '.\n', '!\n', '?\n']):
-                                        # Split on sentence boundaries
-                                        sentences = self._split_sentences(sentence_buffer)
-                                        
-                                        # Send complete sentences to TTS
-                                        for sentence in sentences[:-1]:  # All but last (incomplete)
-                                            if sentence.strip():
-                                                logger.info(f"🗣️ Sentence ready: '{sentence[:50]}...'")
-                                                await self._text_to_speech(sentence.strip())
-                                        
-                                        # Keep incomplete part in buffer
-                                        sentence_buffer = sentences[-1] if sentences else ""
-                        
-                        except json.JSONDecodeError:
-                            continue
-                
-                # Send any remaining text
-                if sentence_buffer.strip():
-                    logger.info(f"🗣️ Final fragment: '{sentence_buffer[:50]}...'")
-                    await self._text_to_speech(sentence_buffer.strip())
-                
-                logger.info(f"✅ LLM Complete: '{full_response[:100]}...'")
-                
-                # Add to history
-                with self.messages_lock:
-                    self.messages.append({"role": "assistant", "content": full_response})
-                
-                self._last_response_at = time.time()
-                self._total_llm_tokens += len(full_response.split())  # Rough estimate
-                
+            # Queue frame to pipeline
+            await self._task.queue_frame(frame)
+            
+            self._last_response_at = time.time()
+            logger.info("✅ Frame queued successfully")
+            
         except Exception as e:
             self._requests_failed += 1
-            logger.error(f"❌ LLM/TTS error (failures: {self._requests_failed}): {e}", exc_info=True)
-
-    def _split_sentences(self, text: str):
-        """Split text on sentence boundaries"""
-        import re
-        # Split on . ! ? followed by space or newline
-        sentences = re.split(r'([.!?][\s\n]+)', text)
-        
-        # Rejoin the punctuation with the sentence
-        result = []
-        for i in range(0, len(sentences)-1, 2):
-            result.append(sentences[i] + sentences[i+1])
-        
-        # Add any remaining text
-        if len(sentences) % 2 == 1:
-            result.append(sentences[-1])
-        
-        return result
-
-    async def _text_to_speech(self, text: str):
-        """Convert text to speech using Deepgram"""
-        try:
-            logger.info(f"🔊 TTS: '{text[:50]}...'")
-            
-            self._total_tts_chars += len(text)
-            
-            # Call Deepgram TTS API
-            async with self._session.post(
-                "https://api.deepgram.com/v1/speak?model=aura-asteria-en",
-                headers={
-                    "Authorization": f"Token {self.deepgram_api_key}",
-                    "Content-Type": "application/json",
-                },
-                json={"text": text}
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise Exception(f"Deepgram error {response.status}: {error_text}")
-                
-                audio_data = await response.read()
-                logger.info(f"✅ Audio: {len(audio_data)} bytes")
-                
-                # Send to callback
-                if self.audio_output_callback:
-                    self.audio_output_callback(audio_data)
-                    logger.info("✅ Audio sent")
-                    
-        except Exception as e:
-            logger.error(f"❌ TTS error: {e}")
-
+            logger.error(f"❌ Error sending to pipeline: {e}", exc_info=True)
+    
     def get_health_status(self):
-        """Get health status with cost estimates"""
+        """Get health status and metrics"""
         now = time.time()
-        
-        # Cost estimates (approximate)
-        groq_cost = (self._total_llm_tokens / 1000) * 0.0005  # ~$0.0005 per 1k tokens
-        deepgram_cost = (self._total_tts_chars / 1000) * 0.015  # $0.015 per 1k chars
         
         return {
             "running": self._is_running,
@@ -344,42 +607,107 @@ class PipecatSpeakHandler:
             "requests_made": self._requests_made,
             "requests_failed": self._requests_failed,
             "last_response_seconds_ago": now - self._last_response_at if self._last_response_at else None,
-            "estimated_costs": {
-                "groq_usd": round(groq_cost, 4),
-                "deepgram_usd": round(deepgram_cost, 4),
-                "total_usd": round(groq_cost + deepgram_cost, 4),
-            },
-            "usage": {
-                "llm_tokens": self._total_llm_tokens,
-                "tts_chars": self._total_tts_chars,
-            }
+            "llm_provider": self.llm_service.__class__.__name__ if self.llm_service else None,
+            "tts_provider": self.tts_service.__class__.__name__ if self.tts_service else None,
+            "is_speaking": self.is_speaking,
         }
-
+    
+    @property
+    def is_speaking(self) -> bool:
+        """Check if bot is currently speaking (for VAD interruption logic)
+        
+        Use this in VAD logic:
+            if vad_detected and handler.is_speaking:
+                handler.interrupt()
+        """
+        if self._audio_processor:
+            return self._audio_processor.is_speaking
+        return False
+    
+    def interrupt(self):
+        """Interrupt current speech output - call this from VAD when user speaks
+        
+        This will:
+        1. Signal audio processor to drop remaining audio frames
+        2. Queue an EndFrame to stop the pipeline gracefully
+        
+        Note: With REST TTS (Deepgram .stream()), the TTS generation cannot be 
+        cancelled mid-generation. But we CAN stop audio playback immediately.
+        For true mid-sentence cancellation, you need WebSocket TTS.
+        """
+        if not self._is_running:
+            return
+        
+        logger.info("🛑 INTERRUPT: Stopping speech output")
+        
+        # 1. Signal audio processor to drop frames immediately
+        if self._audio_processor:
+            self._audio_processor.set_interrupted(True)
+        
+        # 2. Queue EndFrame to stop pipeline processing
+        if self._event_loop and self._task and not self._event_loop.is_closed():
+            try:
+                asyncio.run_coroutine_threadsafe(
+                    self._task.queue_frame(EndFrame()),
+                    self._event_loop
+                )
+                logger.info("✅ EndFrame queued for interruption")
+            except Exception as e:
+                logger.error(f"❌ Failed to queue EndFrame: {e}")
+    
     def update_system_prompt(self, prompt: str):
+        """Update the system prompt"""
         prompt = prompt.replace("{", "").replace("}", "")
         self.full_system_prompt = BASE_PROMPT.format(user_prompt=prompt)
         
-        with self.messages_lock:
-            if self.messages:
-                self.messages[0] = {"role": "system", "content": self.full_system_prompt}
+        with self._messages_lock:
+            if self._messages:
+                self._messages[0] = {"role": "system", "content": self.full_system_prompt}
+        
         logger.info("✅ System prompt updated")
-
+    
     def stop(self):
-        logger.info("🛑 Stopping...")
+        """Stop the pipeline"""
+        logger.info("🛑 Stopping Pipecat pipeline...")
         self._is_running = False
         
         with self._debounce_lock:
             if self._debounce_timer:
                 self._debounce_timer.cancel()
-
+        
+        # First stop the event loop to unblock task.run()
+        if self._event_loop and not self._event_loop.is_closed():
+            try:
+                # Stop the event loop to break out of run_until_complete
+                self._event_loop.call_soon_threadsafe(self._event_loop.stop)
+            except Exception as e:
+                logger.debug(f"Event loop stop: {e}")
+        
+        # Wait for pipeline thread to finish (with short timeout)
         if self._pipeline_thread and self._pipeline_thread.is_alive():
-            self._pipeline_thread.join(timeout=5)
-
+            self._pipeline_thread.join(timeout=2)
+            if self._pipeline_thread.is_alive():
+                logger.warning("Pipeline thread didn't stop cleanly")
+        
+        # Close event loop
+        if self._event_loop and not self._event_loop.is_closed():
+            try:
+                self._event_loop.close()
+            except Exception:
+                pass
+        
+        logger.info("✅ Pipeline stopped")
+    
     def is_ready(self) -> bool:
         return self._is_running and self._pipeline_ready.is_set()
 
 
+# Fallback if Pipecat not available
 if not PIPECAT_AVAILABLE:
     class PipecatSpeakHandler:
         def __init__(self, *args, **kwargs):
-            raise ImportError("Pipecat not installed")
+            raise ImportError(
+                "Pipecat framework not installed.\n"
+                "Install with: pip install 'pipecat-ai[deepgram,groq]'\n"
+                "For more providers: pip install 'pipecat-ai[openai,anthropic,elevenlabs]'"
+            )
