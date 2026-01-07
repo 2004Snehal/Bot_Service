@@ -141,7 +141,7 @@ def get_docker_client():
 # ============================================================================
 def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min_record_time: int, bot_name: str, system_prompt: str = None, enable_recording: bool = True, enable_transcript: bool = True, enable_speak: bool = False):
     """
-    Launch the bot. Preferred mode: Docker container (image 'bot:voice' or specific ID).
+    Launch the bot. Preferred mode: Docker container (image 'ghcr.io/hicappyai/voice:bot' or specific ID).
     Falls back to subprocess if Docker is unavailable.
     
     Args:
@@ -173,7 +173,7 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
         # Try Docker first
         try:
             client = get_docker_client()
-            image_ref = os.getenv("BOT_DOCKER_IMAGE", "bot:voice")  # default to given ID
+            image_ref = os.getenv("BOT_DOCKER_IMAGE", "ghcr.io/hicappyai/voice:bot")  # default to latest image
             logger.info(f"Launching Docker container for bot {bot_id} (user: {user_id}) with image {image_ref}...")
 
             # Build environment variables (container)
