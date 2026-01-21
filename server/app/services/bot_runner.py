@@ -176,20 +176,14 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
             image_ref = os.getenv("BOT_DOCKER_IMAGE", "ghcr.io/hicappyai/voice:bot")  # default to latest image
             logger.info(f"Launching Docker container for bot {bot_id} (user: {user_id}) with image {image_ref}...")
 
-            # Build environment variables (container)
+            # Only pass bot-specific variables, inherit API keys from host environment
             env_vars = {
                 "BOT_ID": str(bot_id),
                 "USER_ID": str(user_id),
                 "MEETING_ID": str(meeting_id),
-                "TTS_MICROSERVICE_URL": os.getenv("TTS_MICROSERVICE_URL", "https://smolservice.onrender.com"),
-                "DEEPGRAM_API_KEY": os.getenv("DEEPGRAM_API_KEY", ""),
-                "GROQ_API_KEY": os.getenv("GROQ_API_KEY", ""),
                 "ENABLE_RECORDING": str(enable_recording),
                 "ENABLE_TRANSCRIPT": str(enable_transcript),
                 "ENABLE_SPEAK": str(enable_speak),
-                # AWS S3 - using IAM roles from EC2 instance (no explicit credentials needed)
-                "AWS_REGION": os.getenv("AWS_REGION", "us-east-1"),
-                "S3_BUCKET_NAME": os.getenv("S3_BUCKET_NAME", "hicapy"),
             }
             if system_prompt:
                 env_vars["SYSTEM_PROMPT"] = system_prompt
@@ -202,16 +196,43 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
                 "--speak", "true" if enable_speak else "false"
             ]
 
+            # Check for .env file in project root
+            project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+            env_file_path = os.path.join(project_root, ".env")
+            
             container_name = f"bot_{bot_id}_{str(meeting_id)[:8]}"
-            container = client.containers.run(
-                image=image_ref,
-                detach=True,
-                auto_remove=True,
-                name=container_name,
-                environment=env_vars,
-                command=command,
-                shm_size="2g"
-            )
+            
+            # Prepare container run kwargs
+            run_kwargs = {
+                "image": image_ref,
+                "detach": True,
+                "auto_remove": True,
+                "name": container_name,
+                "environment": env_vars,
+                "command": command,
+                "shm_size": "2g"
+            }
+            
+            # If .env file exists, use it to load all environment variables
+            if os.path.exists(env_file_path):
+                logger.info(f"Using .env file from: {env_file_path}")
+                # Read .env file and add to environment
+                with open(env_file_path, 'r') as f:
+                    for line in f:
+                        line = line.strip()
+                        if line and not line.startswith('#') and '=' in line:
+                            key, value = line.split('=', 1)
+                            # Don't override bot-specific vars
+                            if key not in env_vars:
+                                env_vars[key] = value
+            else:
+                # Fallback: manually add common env vars from host
+                logger.info("No .env file found, using host environment variables")
+                for key in ["DEEPGRAM_API_KEY", "GROQ_API_KEY", "TTS_MICROSERVICE_URL", "AWS_REGION", "S3_BUCKET_NAME"]:
+                    if key in os.environ:
+                        env_vars[key] = os.environ[key]
+            
+            container = client.containers.run(**run_kwargs)
 
             logger.info(f"Container started: {container.id}")
             meeting_record.status = "running"

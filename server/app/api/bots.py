@@ -180,7 +180,7 @@ def stop_bot(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """Stop a running bot (must belong to current user)."""
+    """Stop a running bot with verification and database cleanup."""
     # Verify ownership
     bot = db.query(Bot).filter(
         Bot.id == bot_id,
@@ -189,10 +189,51 @@ def stop_bot(
     if not bot:
         raise HTTPException(status_code=404, detail="Bot not found")
     
+    # Find active meeting for this bot
+    active_meeting = db.query(Meeting).filter(
+        Meeting.bot_id == bot_id,
+        Meeting.user_id == current_user.user_id,
+        Meeting.status == "running"
+    ).order_by(Meeting.start_time.desc()).first()
+    
+    # Try to stop via session manager first
     success = session_manager.stop_bot(bot_id)
-    if not success:
-        raise HTTPException(status_code=400, detail="Bot is not running or could not be stopped")
-    return {"status": "stopping", "bot_id": bot_id}
+    
+    # If session manager didn't have it, try force cleanup by container name
+    if not success and active_meeting:
+        from server.app.services.session_manager import session_manager
+        force_success = session_manager.force_cleanup_bot(bot_id, active_meeting.meeting_id)
+        if force_success:
+            success = True
+    
+    # Update database status regardless of whether container was found
+    if active_meeting:
+        active_meeting.status = "stopped"
+        active_meeting.end_time = datetime.utcnow()
+        db.commit()
+        db.refresh(active_meeting)
+    
+    # Also check for any other running meetings for this bot and clean them up
+    other_running = db.query(Meeting).filter(
+        Meeting.bot_id == bot_id,
+        Meeting.status.in_(["starting", "running"])
+    ).all()
+    
+    if other_running:
+        for meeting in other_running:
+            meeting.status = "stopped"
+            meeting.end_time = datetime.utcnow()
+        db.commit()
+    
+    if not success and not active_meeting:
+        raise HTTPException(status_code=400, detail="Bot is not running")
+    
+    return {
+        "status": "stopped",
+        "bot_id": bot_id,
+        "meeting_id": active_meeting.meeting_id if active_meeting else None,
+        "message": "Bot stopped and database updated"
+    }
 
 
 @router.get("/{bot_id}/status")

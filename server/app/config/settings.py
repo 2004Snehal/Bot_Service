@@ -30,9 +30,6 @@ class Settings(BaseSettings):
     MONGODB_URI: Optional[str] = None
     MONGODB_DATABASE: str = "cuemeet_transcripts"
     
-    # Docker image for bot containers
-    BOT_DOCKER_IMAGE: str = "ghcr.io/hicappyai/voice:bot"
-    
     class Config:
         env_file = ".env"
         extra = "ignore"  # Ignore extra env vars not defined here
