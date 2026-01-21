@@ -201,7 +201,6 @@ def stop_bot(
     
     # If session manager didn't have it, try force cleanup by container name
     if not success and active_meeting:
-        from server.app.services.session_manager import session_manager
         force_success = session_manager.force_cleanup_bot(bot_id, active_meeting.meeting_id)
         if force_success:
             success = True
