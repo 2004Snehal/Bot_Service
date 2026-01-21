@@ -139,7 +139,7 @@ def get_docker_client():
 # ============================================================================
 # NEW SUBPROCESS VERSION (WITHOUT DOCKER)
 # ============================================================================
-def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min_record_time: int, bot_name: str, system_prompt: str = None, enable_recording: bool = True, enable_transcript: bool = True, enable_speak: bool = False):
+def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min_record_time: int, bot_name: str, system_prompt: str = None, enable_recording: bool = True, enable_transcript: bool = True, enable_speak: bool = True):
     """
     Launch the bot. Preferred mode: Docker container (image 'ghcr.io/hicappyai/voice:bot' or specific ID).
     Falls back to subprocess if Docker is unavailable.
@@ -154,11 +154,14 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
         system_prompt: Custom system prompt for the bot
         enable_recording: Enable video/audio recording
         enable_transcript: Enable transcript extraction
-        enable_speak: Enable bot voice responses
+        enable_speak: Enable bot voice responses (default True)
     """
     from server.app.db.database import SessionLocal
     from server.app.db.models import Meeting
     from server.app.services.session_manager import session_manager
+    
+    # Log the enable_speak value to debug
+    logger.info(f"run_bot_logic called with enable_speak={enable_speak}")
     
     db = SessionLocal()
     
@@ -181,12 +184,14 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
                 "BOT_ID": str(bot_id),
                 "USER_ID": str(user_id),
                 "MEETING_ID": str(meeting_id),
-                "ENABLE_RECORDING": str(enable_recording),
-                "ENABLE_TRANSCRIPT": str(enable_transcript),
-                "ENABLE_SPEAK": str(enable_speak),
+                "ENABLE_RECORDING": "True" if enable_recording else "False",
+                "ENABLE_TRANSCRIPT": "True" if enable_transcript else "False",
+                "ENABLE_SPEAK": "True" if enable_speak else "False",
             }
             if system_prompt:
                 env_vars["SYSTEM_PROMPT"] = system_prompt
+            
+            logger.info(f"Docker env vars: ENABLE_SPEAK={env_vars['ENABLE_SPEAK']}")
 
             # Build command passed to entrypoint
             command = [
@@ -195,6 +200,8 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
                 "--min-record-time", str(min_record_time),
                 "--speak", "true" if enable_speak else "false"
             ]
+            
+            logger.info(f"Docker command: {' '.join(command)}")
 
             # Check for .env file in project root
             project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
@@ -369,9 +376,22 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
 
 def start_bot_thread(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min_record_time: int, bot_name: str, system_prompt: str = None, enable_recording: bool = True, enable_transcript: bool = True, enable_speak: bool = True):
     """Start a bot in a background thread."""
+    logger.info(f"start_bot_thread called: enable_speak={enable_speak}, enable_recording={enable_recording}, enable_transcript={enable_transcript}")
+    
     thread = threading.Thread(
         target=run_bot_logic,
-        args=(user_id, bot_id, meeting_id, meetlink, min_record_time, bot_name, system_prompt, enable_recording, enable_transcript, enable_speak),
+        kwargs={
+            "user_id": user_id,
+            "bot_id": bot_id,
+            "meeting_id": meeting_id,
+            "meetlink": meetlink,
+            "min_record_time": min_record_time,
+            "bot_name": bot_name,
+            "system_prompt": system_prompt,
+            "enable_recording": enable_recording,
+            "enable_transcript": enable_transcript,
+            "enable_speak": enable_speak
+        },
         daemon=True
     )
     thread.start()
