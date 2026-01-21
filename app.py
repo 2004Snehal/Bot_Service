@@ -42,13 +42,27 @@ if __name__ == "__main__":
         parser.add_argument("--min-record-time", type=int, default=7200, help="Minimum recording time in seconds (Default: 2 hours)")
         parser.add_argument("--bot-name", default="CueMeet Assistant", help="Name of the bot in the meeting (Default: 'CueMeet Assistant')")
         parser.add_argument("--max-waiting-time", type=int, default=1800, help="Maximum waiting time in seconds (Default: 30 minutes)")
-        parser.add_argument("--speak", type=lambda x: x.lower() == 'true', default=False, help="Enable voice assistant with Pipecat (Default: False)")
+        parser.add_argument("--speak", type=str, default=None, help="Enable voice assistant with Pipecat (Default: False)")
 
         args = parser.parse_args()
         print(f"[MAIN] Arguments parsed. Meeting link: {args.meetlink}")
+        
+        # Determine enable_speak from argument OR environment variable
+        # Priority: --speak argument > ENABLE_SPEAK env var > default (False)
+        if args.speak is not None:
+            # Argument was provided
+            enable_speak = args.speak.lower() in ('true', '1', 'yes')
+        else:
+            # Check environment variable
+            env_speak = os.getenv('ENABLE_SPEAK', 'False')
+            enable_speak = env_speak.lower() in ('true', '1', 'yes')
+        
+        print(f"[MAIN] --speak arg: {args.speak}")
+        print(f"[MAIN] ENABLE_SPEAK env: {os.getenv('ENABLE_SPEAK', 'Not set')}")
+        print(f"[MAIN] Final enable_speak value: {enable_speak}")
 
         print("[MAIN] Creating JoinGoogleMeet instance...")
-        print(f"[MAIN] Voice assistant enabled: {args.speak}")
+        print(f"[MAIN] Voice assistant enabled: {enable_speak}")
         meet_bot = JoinGoogleMeet(
             meetlink=clean_meeting_link(args.meetlink),
             start_time_utc=convert_timestamp_to_utc(args.start_time) if args.start_time else None,
@@ -56,7 +70,7 @@ if __name__ == "__main__":
             min_record_time=args.min_record_time,
             bot_name=args.bot_name,
             max_waiting_time=args.max_waiting_time,
-            enable_speak=args.speak,
+            enable_speak=enable_speak,
             project_settings=get_settings(),
             logger=LogConfig().get_logger("Google Meet Bot")
         )
