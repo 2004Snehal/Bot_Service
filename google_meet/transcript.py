@@ -50,15 +50,33 @@ class TranscriptEvent:
         """Mark event as complete."""
         self.end_ms = end_ms or int(time.time() * 1000)
     
-    def to_dict(self) -> dict:
+    @staticmethod
+    def _ms_to_hhmmss(ms: int) -> str:
+        """Convert milliseconds to HH:MM:SS format."""
+        if ms is None or ms < 0:
+            return "00:00:00"
+        total_seconds = ms // 1000
+        hours = total_seconds // 3600
+        minutes = (total_seconds % 3600) // 60
+        seconds = total_seconds % 60
+        return f"{hours:02d}:{minutes:02d}:{seconds:02d}"
+    
+    def to_dict(self, meeting_start_ms: int = 0) -> dict:
+        """Convert to dict with timestamps relative to meeting start."""
+        # Calculate relative timestamps
+        relative_start_ms = max(0, self.start_ms - meeting_start_ms) if self.start_ms else 0
+        relative_end_ms = max(0, self.end_ms - meeting_start_ms) if self.end_ms else None
+        
         return {
             "id": self.id,
             "speaker": self.speaker,
             "speaker_id": self.speaker_id,
             "role": self.role,
             "text": self.text,
-            "start_ms": self.start_ms,
-            "end_ms": self.end_ms,
+            "start_ms": relative_start_ms,
+            "end_ms": relative_end_ms,
+            "start_time": self._ms_to_hhmmss(relative_start_ms),
+            "end_time": self._ms_to_hhmmss(relative_end_ms) if relative_end_ms else None,
             "source": self.source,
             "confidence": self.confidence
         }
@@ -522,16 +540,21 @@ class TranscriptExtractor:
         logger.info(f"🎙️ Stopped. {len(self.finalized_events)} events captured.")
     
     def get_transcript(self) -> Dict:
-        """Get full transcript (only finalized events)."""
+        """Get full transcript (only finalized events) with relative timestamps."""
         with self.lock:
+            # Calculate meeting duration
+            meeting_end_time = int(time.time() * 1000)
+            duration_ms = meeting_end_time - self.meeting_start_time
+            
             return {
                 "meeting_id": self.meeting_id,
-                "meeting_start_ms": self.meeting_start_time,
-                "meeting_end_ms": int(time.time() * 1000),
+                "meeting_start_ms": 0,  # Relative start is always 0
+                "meeting_end_ms": duration_ms,
+                "meeting_duration": TranscriptEvent._ms_to_hhmmss(duration_ms),
                 "bot_name": self.bot_name,
                 "participants": list(self.speaker_map.keys()),
                 "event_count": len(self.finalized_events),
-                "events": [e.to_dict() for e in self.finalized_events]
+                "events": [e.to_dict(self.meeting_start_time) for e in self.finalized_events]
             }
     
     def save_transcript(self, filepath: str = None) -> str:
