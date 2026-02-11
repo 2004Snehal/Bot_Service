@@ -41,10 +41,118 @@ This bot features an advanced real-time audio pipeline:
 ### Environment Variables
 Ensure your `.env` file includes:
 ```bash
+# Required for Transcription
 DEEPGRAM_API_KEY=your_key
+
+# Required for Voice/LLM
 GROQ_API_KEY=your_key
-TTS_MICROSERVICE_URL=http://localhost:8000/generate-audio
+
+# Bot Configuration
+BOT_NAME="CueMeet Assistant"
+ENABLE_RECORDING=true        # Save MP4 video
+ENABLE_TRANSCRIPT=true       # Save JSON transcript
+ENABLE_SPEAK=false          # Enable voice interaction (requires Pipecat)
 ```
+
+---
+
+## 💻 Local Development Setup
+
+### 1. Prerequisites
+- Python 3.10+
+- [Poetry](https://python-poetry.org/) (recommended) or pip
+- Chrome Browser
+- **Audio Setup** (for Windows): See "Audio Setup (Windows)" section below
+
+### 2. Installation
+
+Using Poetry (Recommended):
+```bash
+# Install dependencies
+make install
+# OR manually:
+poetry install
+
+# Activate shell
+make poetry-shell
+```
+
+Using Pip:
+```bash
+pip install -r requirements.txt
+# For voice features:
+pip install -r requirements_voice.txt
+```
+
+### 3. Running Locally
+
+Run the bot with a Google Meet link:
+
+```bash
+# Basic recording & transcription
+python app.py "https://meet.google.com/abc-defg-hij"
+
+# With voice assistant enabled
+python app.py "https://meet.google.com/abc-defg-hij" --speak true
+```
+
+**Common Arguments:**
+- `--min-record-time`: Minimum duration in seconds (default: 7200)
+- `--bot-name`: Name displayed in the meeting
+- `--speak`: Enable voice interaction (`true`/`false`)
+
+---
+
+##  Whale Docker Deployment (Production)
+
+For production, the bot runs in a Docker container with a virtualized audio stack (PulseAudio). This eliminates the need for physical audio devices or Virtual Cables.
+
+### 1. Build Options
+
+**Option A: Lightweight (Recording Only)**
+Best for transcription and recording. Smaller image size (~500MB).
+```bash
+docker build -t gmeet-bot:lite .
+```
+
+**Option B: Full Voice Assistant**
+Includes Pipecat and AI voice dependencies. Larger image size (~800MB).
+```bash
+docker build --build-arg ENABLE_VOICE=true -t gmeet-bot:voice .
+```
+
+### 2. Running with Docker
+
+**Run a specific meeting:**
+```bash
+# For recording only
+docker run --rm \
+  --env-file .env \
+  -v $(pwd)/out:/app/out \
+  --shm-size=2g \
+  gmeet-bot:lite "https://meet.google.com/abc-defg-hij"
+
+# For voice assistant
+docker run --rm \
+  --env-file .env \
+  -v $(pwd)/out:/app/out \
+  --shm-size=2g \
+  gmeet-bot:voice "https://meet.google.com/abc-defg-hij" --speak true
+```
+
+**Using Docker Compose:**
+```bash
+# Start the service (defined in docker-compose.yml)
+docker-compose up -d
+
+# Check logs
+docker-compose logs -f
+```
+
+### Audio Architecture (Docker)
+The container creates two virtual PulseAudio sinks:
+- **MeetOutput**: Chrome audio → FFmpeg recording
+- **BotMic**: Bot audio → Chrome microphone input
 
 ---
 
@@ -98,28 +206,6 @@ For version compatibility and migration steps, see [UPGRADE.md](./UPGRADE.md).
 ## 📜 Code of Conduct
 
 We follow a standard of respectful communication and collaboration. Please review our [Code of Conduct](./CODE_OF_CONDUCT.md) before contributing.
-
----
-
-## 🐳 Docker Setup (Linux/Production)
-
-For production deployment, the bot runs in Docker with a fully virtualized audio stack using PulseAudio.
-
-### Quick Start
-```bash
-# Build the image
-docker build -t cuemeet-bot .
-
-# Run with a meeting link
-docker run --rm -v "$(pwd)/out:/app/out" --shm-size=2g cuemeet-bot "https://meet.google.com/xxx-yyyy-zzz"
-```
-
-### Audio Architecture (Docker)
-The Docker container creates two virtual audio devices:
-- **MeetOutput**: Chrome plays meeting audio here → FFmpeg records it → Bot hears
-- **BotMic → VirtualMic**: Bot plays audio here → Chrome uses as microphone → Meeting hears
-
-This prevents audio feedback loops.
 
 ---
 

@@ -586,6 +586,30 @@ class JoinGoogleMeet:
         pulse_monitor = "MeetOutput.monitor" if platform.system().lower().startswith("linux") else "default"
         output_wav_file = f"{self.output_file}.wav"
 
+        if self.enable_transcript:
+            # Use callback to send transcripts directly to Pipecat when speak mode enabled
+            if self.enable_speak and self.speak_handler:
+                self.transcript_extractor = TranscriptExtractor(
+                    self.browser,
+                    bot_name=self.bot_name,
+                    meeting_id=self.id,
+                    on_utterance_finalized=self._handle_finalized_utterance,
+                    utterance_timeout_ms=2000  # 2 seconds silence = finalize
+                )
+                self.transcript_extractor.start()
+                self.logger.info("✅ Transcript extractor started (routing to Pipecat)")
+            else:
+                # Just extract transcripts without processing
+                self.transcript_extractor = TranscriptExtractor(
+                    self.browser,
+                    bot_name=self.bot_name,
+                    meeting_id=self.id,
+                    on_utterance_finalized=None,  # No callback, just store
+                    utterance_timeout_ms=2000
+                )
+                self.transcript_extractor.start()
+                self.logger.info("✅ Transcript extractor started (recording only)")
+
         # Linux/WSL Specific Commands
         if platform.system().lower().startswith("linux"):
             # Audio-only recording (for transcription/backup)
@@ -642,29 +666,6 @@ class JoinGoogleMeet:
                 except Exception as e:
                     self.logger.error(f"❌ Failed to start screen recording: {e}")
                 
-            if self.enable_transcript:
-                # Use callback to send transcripts directly to Pipecat when speak mode enabled
-                if self.enable_speak and self.speak_handler:
-                    self.transcript_extractor = TranscriptExtractor(
-                        self.browser,
-                        bot_name=self.bot_name,
-                        meeting_id=self.id,
-                        on_utterance_finalized=self._handle_finalized_utterance,
-                        utterance_timeout_ms=2000  # 2 seconds silence = finalize
-                    )
-                    self.transcript_extractor.start()
-                    self.logger.info("✅ Transcript extractor started (routing to Pipecat)")
-                else:
-                    # Just extract transcripts without processing
-                    self.transcript_extractor = TranscriptExtractor(
-                        self.browser,
-                        bot_name=self.bot_name,
-                        meeting_id=self.id,
-                        on_utterance_finalized=None,  # No callback, just store
-                        utterance_timeout_ms=2000
-                    )
-                    self.transcript_extractor.start()
-                    self.logger.info("✅ Transcript extractor started (recording only)")
 
     def pause_recording(self):
         """Pause recording by stopping FFmpeg processes without ending session."""
