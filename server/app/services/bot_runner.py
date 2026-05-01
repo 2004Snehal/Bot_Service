@@ -5,6 +5,8 @@ import subprocess
 import uuid
 from datetime import datetime
 
+from server.app.services.meeting_status_store import upsert_meeting_status
+
 logger = logging.getLogger(__name__)
 
 # ============================================================================
@@ -69,7 +71,7 @@ def get_docker_client():
 #             "BOT_ID": bot_id,
 #             "USER_ID": user_id,  # Pass user_id to container for storage paths
 #             "MEETING_ID": meeting_id,
-#             "TTS_MICROSERVICE_URL": os.getenv("TTS_MICROSERVICE_URL", "https://smolservice.onrender.com"),
+#             "TTS_MICROSERVICE_URL": os.getenv("TTS_MICROSERVICE_URL"),
 #             "DEEPGRAM_API_KEY": os.getenv("DEEPGRAM_API_KEY"),
 #             "GROQ_API_KEY": os.getenv("GROQ_API_KEY"),
 #         }
@@ -171,6 +173,15 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
         logger.error(f"Meeting record {meeting_id} not found")
         return
 
+    upsert_meeting_status(
+        meeting_id=meeting_record.meeting_id,
+        user_id=meeting_record.user_id,
+        bot_id=meeting_record.bot_id,
+        status=meeting_record.status or "starting",
+        engaged=meeting_record.status in {"starting", "running"},
+        last_started_at=meeting_record.start_time or datetime.utcnow(),
+    )
+
     process = None
     try:
         # Try Docker first
@@ -245,6 +256,15 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
             meeting_record.status = "running"
             db.commit()
 
+            upsert_meeting_status(
+                meeting_id=meeting_record.meeting_id,
+                user_id=meeting_record.user_id,
+                bot_id=meeting_record.bot_id,
+                status="running",
+                engaged=True,
+                last_started_at=datetime.utcnow(),
+            )
+
             # Track container (store container object)
             from server.app.services.session_manager import session_manager
             session_manager.add_bot(bot_id, container, None)
@@ -256,9 +276,27 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
             if exit_code == 0:
                 meeting_record.status = "completed"
                 logger.info(f"Bot {bot_id} completed successfully (container)")
+                upsert_meeting_status(
+                    meeting_id=meeting_record.meeting_id,
+                    user_id=meeting_record.user_id,
+                    bot_id=meeting_record.bot_id,
+                    status="completed",
+                    engaged=False,
+                    last_stopped_at=datetime.utcnow(),
+                    termination_reason="container_completed",
+                )
             else:
                 meeting_record.status = "failed"
                 logger.error(f"Container exited with code {exit_code}")
+                upsert_meeting_status(
+                    meeting_id=meeting_record.meeting_id,
+                    user_id=meeting_record.user_id,
+                    bot_id=meeting_record.bot_id,
+                    status="failed",
+                    engaged=False,
+                    last_stopped_at=datetime.utcnow(),
+                    termination_reason=f"container_exit_{exit_code}",
+                )
                 # Log some container stderr
                 try:
                     logs = container.logs(tail=200)
@@ -288,15 +326,15 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
             "USER_ID": str(user_id),
             "MEETING_ID": str(meeting_id),
             "TTS_MICROSERVICE_URL": os.getenv("TTS_MICROSERVICE_URL", "https://smolservice.onrender.com"),
-            "DEEPGRAM_API_KEY": os.getenv("DEEPGRAM_API_KEY", ""),
-            "GROQ_API_KEY": os.getenv("GROQ_API_KEY", ""),
+            "DEEPGRAM_API_KEY": os.environ.get("DEEPGRAM_API_KEY", ""),
+            "GROQ_API_KEY": os.environ.get("GROQ_API_KEY", ""),
             "OUTPUT_DIR": temp_dir,  # Temp directory (bot uploads to S3 directly)
             "ENABLE_RECORDING": str(enable_recording),
             "ENABLE_TRANSCRIPT": str(enable_transcript),
             "ENABLE_SPEAK": str(enable_speak),
             # AWS S3 - using IAM roles (no explicit credentials)
-            "AWS_REGION": os.getenv("AWS_REGION", "us-east-1"),
-            "S3_BUCKET_NAME": os.getenv("S3_BUCKET_NAME", ""),
+            "AWS_REGION": os.environ.get("AWS_REGION", ""),
+            "S3_BUCKET_NAME": os.environ.get("S3_BUCKET_NAME", ""),
         })
         if system_prompt:
             env_vars["SYSTEM_PROMPT"] = system_prompt
@@ -322,10 +360,18 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
         )
         logger.info(f"Bot process started: PID {process.pid}")
         meeting_record.status = "running"
+        upsert_meeting_status(
+            meeting_id=meeting_record.meeting_id,
+            user_id=meeting_record.user_id,
+            bot_id=meeting_record.bot_id,
+            status="running",
+            engaged=True,
+            last_started_at=datetime.utcnow(),
+        )
         
         # S3 URLs will be set by the bot directly - we just track expected paths
-        s3_bucket = os.getenv("S3_BUCKET_NAME", "")
-        aws_region = os.getenv("AWS_REGION", "us-east-1")
+        s3_bucket = os.environ.get("S3_BUCKET_NAME", "")
+        aws_region = os.environ.get("AWS_REGION", "")
         if s3_bucket:
             base_s3_url = f"https://{s3_bucket}.s3.{aws_region}.amazonaws.com/meetings/meet_{meeting_id}"
             meeting_record.recording_s3_url = f"{base_s3_url}/video/recording.mp4"
@@ -345,10 +391,28 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
             meeting_record.status = "completed"
             logger.info(f"Bot {bot_id} completed successfully")
             # Bot handles S3 uploads directly, no need to upload here
+            upsert_meeting_status(
+                meeting_id=meeting_record.meeting_id,
+                user_id=meeting_record.user_id,
+                bot_id=meeting_record.bot_id,
+                status="completed",
+                engaged=False,
+                last_stopped_at=datetime.utcnow(),
+                termination_reason="process_completed",
+            )
             db.commit()
         else:
             meeting_record.status = "failed"
             logger.error(f"Bot {bot_id} exited with code {exit_code}")
+            upsert_meeting_status(
+                meeting_id=meeting_record.meeting_id,
+                user_id=meeting_record.user_id,
+                bot_id=meeting_record.bot_id,
+                status="failed",
+                engaged=False,
+                last_stopped_at=datetime.utcnow(),
+                termination_reason=f"process_exit_{exit_code}",
+            )
             if stderr:
                 logger.error(f"Bot stderr: {stderr[:500]}")  # Log first 500 chars
         
@@ -359,6 +423,16 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
         logger.error(f"Bot {bot_id} failed: {e}")
         meeting_record.status = "failed"
         meeting_record.end_time = datetime.utcnow()
+        upsert_meeting_status(
+            meeting_id=meeting_record.meeting_id,
+            user_id=meeting_record.user_id,
+            bot_id=meeting_record.bot_id,
+            status="failed",
+            engaged=False,
+            last_stopped_at=datetime.utcnow(),
+            termination_reason="bot_runner_exception",
+            error=str(e),
+        )
         db.commit()
         
         # Kill process if still running

@@ -23,6 +23,8 @@ services:
       ENABLE_TRANSCRIPT: ${ENABLE_TRANSCRIPT:-true}
       ENABLE_RECORDING: ${ENABLE_RECORDING:-false}
       OUTPUT_DIR: /app/out
+      MONGO_URL: ${MONGO_URL}
+      MONGO_DB_NAME: ${MONGO_DB_NAME}
       
       # Bot Identity
       BOT_NAME: ${BOT_NAME:-Google Bot}

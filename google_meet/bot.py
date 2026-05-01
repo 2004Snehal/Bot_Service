@@ -3,6 +3,7 @@ import sys
 import time
 import json
 import uuid
+import re
 import logging
 import requests
 import platform
@@ -560,13 +561,42 @@ class JoinGoogleMeet:
                 self.end_session()
 
     def attendee_count(self):
-        time.sleep(2)
         count = -1
-        try: 
-            element = WebDriverWait(self.browser, 10).until(EC.presence_of_element_located((By.XPATH, '//div[@class="gFyGKf BN1Lfc"]//div[@class="uGOf1d"]')))
-            count_text = element.get_attribute('textContent').strip()
-            if count_text.isdigit(): count = int(count_text)
-        except: pass
+        try:
+            # Try multiple XPath patterns for better reliability
+            xpaths = [
+                '//div[@class="gFyGKf BN1Lfc"]//div[@class="uGOf1d"]',  # Original
+                '//span[@class="uGOf1d"]',  # Simpler selector
+                '//div[contains(text(), "participants")]',  # Participant text
+                '//*[@aria-label and contains(@aria-label, "participant")]'  # Aria label based
+            ]
+            
+            for xpath in xpaths:
+                try:
+                    element = self.browser.find_element(By.XPATH, xpath)
+                    if element:
+                        count_text = element.get_attribute('textContent').strip() if element else ""
+                        # Try to extract just the number if text contains other content
+                        numbers = re.findall(r'\d+', count_text)
+                        if numbers:
+                            count = int(numbers[0])
+                            self.logger.debug(f"Participant count detected: {count}")
+                            break
+                except:
+                    continue
+            
+            # If we still don't have a count, try counting participant tiles directly
+            if count == -1:
+                try:
+                    participant_tiles = self.browser.find_elements(By.XPATH, '//div[@data-participant-id]')
+                    if participant_tiles:
+                        count = len(participant_tiles)
+                        self.logger.debug(f"Participant count from tiles: {count}")
+                except:
+                    pass
+        except Exception as e:
+            self.logger.debug(f"Error detecting participant count: {e}")
+        
         return count
 
     def start_recording(self):
@@ -971,11 +1001,11 @@ class JoinGoogleMeet:
                             self.resume_recording()
                     elif members != -1:
                         if low_member_count_end_time is None:
-                            low_member_count_end_time = current_time + 120  # 2 minutes
+                            low_member_count_end_time = current_time + 30  # 30 seconds
                             self.pause_recording()
-                            self.logger.info("⏳ No participants; will exit if still empty after 2 minutes.")
+                            self.logger.info("⏳ No participants (count=1); will exit if still empty after 30 seconds.")
                         elif current_time > low_member_count_end_time:
-                            self.logger.info("🚪 Empty for 2 minutes — exiting meeting.")
+                            self.logger.info("🚪 Empty for 30 seconds — exiting meeting.")
                             break
             except Exception as e:
                 self.logger.error(f"Monitor error: {e}")

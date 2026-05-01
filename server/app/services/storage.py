@@ -124,7 +124,7 @@ def upload_meeting_to_s3(file_path: str, user_id: str, meeting_id: str, file_typ
 #     # Check if MongoDB is configured
 #     from server.app.config.settings import settings
 #     
-#     if not settings.MONGODB_URI:
+#     if not settings.MONGO_URL:
 #         logger.warning("MongoDB not configured. Skipping transcript save.")
 #         return None
 #     
@@ -133,8 +133,8 @@ def upload_meeting_to_s3(file_path: str, user_id: str, meeting_id: str, file_typ
 #         from pymongo.errors import PyMongoError
 #         
 #         # Connect to MongoDB
-#         client = MongoClient(settings.MONGODB_URI)
-#         db = client[settings.MONGODB_DATABASE]
+#         client = MongoClient(settings.MONGO_URL)
+#         db = client[settings.MONGO_DB_NAME]
 #         collection = db['transcripts']
 #         
 #         # Read transcript file
@@ -180,14 +180,14 @@ def upload_meeting_to_s3(file_path: str, user_id: str, meeting_id: str, file_typ
 #     """
 #     from server.app.config.settings import settings
 #     
-#     if not settings.MONGODB_URI:
+#     if not settings.MONGO_URL:
 #         return None
 #     
 #     try:
 #         from pymongo import MongoClient
 #         
-#         client = MongoClient(settings.MONGODB_URI)
-#         db = client[settings.MONGODB_DATABASE]
+#         client = MongoClient(settings.MONGO_URL)
+#         db = client[settings.MONGO_DB_NAME]
 #         collection = db['transcripts']
 #         
 #         document = collection.find_one({"meeting_id": meeting_id})

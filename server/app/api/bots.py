@@ -6,6 +6,10 @@ from server.app.db.database import get_db
 from server.app.db.models import Bot, User, Meeting
 from server.app.models.bot import BotCreate, BotResponse, BotStartRequest
 from server.app.services.bot_runner import start_bot_thread
+from server.app.services.meeting_status_store import (
+    get_latest_meeting_status_for_bot,
+    upsert_meeting_status,
+)
 from server.app.services.session_manager import session_manager
 from server.app.api.auth import get_current_user
 
@@ -148,6 +152,24 @@ def start_bot(
     db.add(meeting_record)
     db.commit()
     db.refresh(meeting_record)
+
+    upsert_meeting_status(
+        meeting_id=request.meeting_id,
+        user_id=request.user_id,
+        bot_id=bot_id,
+        meetlink=request.meetlink,
+        meeting_title=bot.name or "Meeting",
+        status="starting",
+        engaged=True,
+        engaged_at=datetime.utcnow(),
+        last_started_at=datetime.utcnow(),
+        bot_config={
+            "enable_recording": request.enable_recording,
+            "enable_transcript": request.enable_transcript,
+            "enable_speak": request.enable_speak,
+            "min_record_time": request.min_record_time,
+        },
+    )
     
     # Start bot with all parameters
     start_bot_thread(
@@ -226,6 +248,17 @@ def stop_bot(
     
     if not success and not active_meeting:
         raise HTTPException(status_code=400, detail="Bot is not running")
+
+    if active_meeting:
+        upsert_meeting_status(
+            meeting_id=active_meeting.meeting_id,
+            user_id=active_meeting.user_id,
+            bot_id=active_meeting.bot_id,
+            status="stopped",
+            engaged=False,
+            last_stopped_at=datetime.utcnow(),
+            termination_reason="stopped_via_api",
+        )
     
     return {
         "status": "stopped",
@@ -249,7 +282,16 @@ def get_bot_status(
     ).first()
     if not bot:
         raise HTTPException(status_code=404, detail="Bot not found")
-    
+
+    mongo_status = get_latest_meeting_status_for_bot(bot_id, current_user.user_id)
+    if mongo_status:
+        return {
+            "status": mongo_status.get("status", "idle"),
+            "bot_id": bot_id,
+            "meeting_id": mongo_status.get("meeting_id"),
+            "engaged": mongo_status.get("engaged", False),
+        }
+
     bot_data = session_manager.get_bot(bot_id)
     if bot_data:
         return {"status": "running", "bot_id": bot_id}

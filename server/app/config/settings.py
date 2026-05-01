@@ -5,6 +5,8 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     PROJECT_NAME: str = "Hicapy Bot API"
     DATABASE_URL: str = "sqlite:///./local.db"
+    MONGO_URL: Optional[str] = None
+    MONGO_DB_NAME: Optional[str] = None
     
     # API Keys (passed to bot containers)
     DEEPGRAM_API_KEY: Optional[str] = None
@@ -26,12 +28,8 @@ class Settings(BaseSettings):
     AWS_REGION: str = "us-east-1"
     S3_BUCKET_NAME: Optional[str] = None
     
-    # MongoDB Configuration (Optional - for transcript storage)
-    MONGODB_URI: Optional[str] = None
-    MONGODB_DATABASE: str = "cuemeet_transcripts"
-    
     class Config:
-        env_file = ".env"
+        env_file = (".env", "../.env")
         extra = "ignore"  # Ignore extra env vars not defined here
 
 settings = Settings()

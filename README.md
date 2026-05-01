@@ -52,6 +52,10 @@ BOT_NAME="CueMeet Assistant"
 ENABLE_RECORDING=true        # Save MP4 video
 ENABLE_TRANSCRIPT=true       # Save JSON transcript
 ENABLE_SPEAK=false          # Enable voice interaction (requires Pipecat)
+
+# Shared Meeting Status Store
+MONGO_URL=mongodb://localhost:27017
+MONGO_DB_NAME=hicapy
 ```
 
 ---

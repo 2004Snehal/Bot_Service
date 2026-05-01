@@ -74,8 +74,12 @@ COPY pulse-client.conf /etc/pulse/client.conf
 COPY pulse-daemon.conf /etc/pulse/daemon.conf
 RUN sed -i 's/\r$//' /etc/pulse/*.conf
 
-# ---- app code LAST ----
-COPY . .
+# ---- bot runtime only (no FastAPI server) ----
+# Keep the image focused on the bot entrypoint and its meeting/audio code.
+COPY app.py utils.py logger.py ./
+COPY monitoring.py ./
+COPY config ./config
+COPY google_meet ./google_meet
 
 COPY entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh

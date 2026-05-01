@@ -20,6 +20,8 @@ class Settings(BaseSettings):
     DEEPGRAM_API_KEY: Optional[str] = Field(None, description="Deepgram API key for speech-to-text")
     GROQ_API_KEY: Optional[str] = Field(None, description="Groq API key for LLM")
     TTS_MICROSERVICE_URL: str = Field("http://localhost:8000/generate-audio", description="TTS microservice URL")
+    MONGO_URL: Optional[str] = Field(None, description="MongoDB connection URL")
+    MONGO_DB_NAME: Optional[str] = Field(None, description="MongoDB database name")
 
     class Config:
         env_file = ".env"
