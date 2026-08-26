@@ -121,7 +121,7 @@ def startup_event():
 
 @app.get("/")
 def root():
-    return {"message": "CueMeet Bot API is running", "docs": "/docs"}
+    return {"message": "Bot API is running", "docs": "/docs"}
 
 @app.get("/health")
 def health_check():

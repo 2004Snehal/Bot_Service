@@ -1,5 +1,5 @@
 """
-Cloud Storage Service for CueMeet Bot
+Cloud Storage Service for Bot Service
 ======================================
 
 Handles uploads to AWS S3 for meeting recordings and transcripts.

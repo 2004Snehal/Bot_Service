@@ -50,7 +50,7 @@ services:
     
     # Network access
     networks:
-      - cuemeet-network
+      - bot-network
     
     # Restart policy
     restart: unless-stopped
@@ -95,7 +95,7 @@ services:
       - "8080:8080"
     
     networks:
-      - cuemeet-network
+      - bot-network
     
     restart: unless-stopped
     
@@ -105,5 +105,5 @@ services:
       - local-tts  # Only start with: docker-compose --profile local-tts up
 
 networks:
-  cuemeet-network:
+  bot-network:
     driver: bridge

@@ -1,6 +1,6 @@
 const extensionStatusJSON_bug = {
   "status": 400,
-  "message": "CueMeet encountered a new error"
+  "message": "Bot encountered a new error"
 }
 const mutationConfig = { childList: true, attributes: true, subtree: true }
 
@@ -58,7 +58,7 @@ if (extensionStatusJSON) {
     meetingRoutines(2)
   }
   else {
-    extensionStatusJSON = { status: 200, message: "<strong>CueMeet is running</strong> <br /> Do not turn off captions" };
+    extensionStatusJSON = { status: 200, message: "<strong>Bot is running</strong> <br /> Do not turn off captions" };
     console.log("Extension status " + extensionStatusJSON.status);
   }
 }
@@ -66,7 +66,7 @@ if (extensionStatusJSON) {
 function checkExtensionStatus() {
   localStorage.setItem('extensionStatusJSON', JSON.stringify({
     status: 200,
-    message: "<strong>CueMeet is running</strong> <br /> Do not turn off captions"
+    message: "<strong>Bot is running</strong> <br /> Do not turn off captions"
   }))
 }
 
@@ -204,7 +204,7 @@ function meetingRoutines(uiType) {
       }, 500)
 
       if (operationMode == "manual")
-        showNotification({ status: 400, message: "<strong>CueMeet is not running</strong> <br /> Turn on captions using the CC icon, if needed" })
+        showNotification({ status: 400, message: "<strong>Bot is not running</strong> <br /> Turn on captions using the CC icon, if needed" })
       else
         showNotification(extensionStatusJSON)
       contains(meetingEndIconData.selector, meetingEndIconData.text)[0].parentElement.parentElement.addEventListener("click", () => {
@@ -299,7 +299,7 @@ function chatMessagesRecorder(mutationsList, observer) {
     catch (error) {
       console.error(error)
       if (isChatMessagesDomErrorCaptured == false && hasMeetingEnded == false) {
-        console.log("There is a bug in CueMeet.", error)
+        console.log("There is a bug in Bot.", error)
         showNotification(extensionStatusJSON_bug)
       }
       isChatMessagesDomErrorCaptured = true

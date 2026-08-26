@@ -40,7 +40,7 @@ if __name__ == "__main__":
         parser.add_argument("--start-time", type=int, default=None, help="Meeting start time (JavaScript timestamp in milliseconds)")
         parser.add_argument("--end-time", type=int, default=None, help="Meeting end time (JavaScript timestamp in milliseconds)")
         parser.add_argument("--min-record-time", type=int, default=7200, help="Minimum recording time in seconds (Default: 2 hours)")
-        parser.add_argument("--bot-name", default="CueMeet Assistant", help="Name of the bot in the meeting (Default: 'CueMeet Assistant')")
+        parser.add_argument("--bot-name", default="Bot Assistant", help="Name of the bot in the meeting (Default: 'Bot Assistant')")
         parser.add_argument("--max-waiting-time", type=int, default=1800, help="Maximum waiting time in seconds (Default: 30 minutes)")
         parser.add_argument("--speak", type=str, default=None, help="Enable voice assistant with Pipecat (Default: False)")
 

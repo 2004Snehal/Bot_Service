@@ -325,7 +325,7 @@ class JoinGoogleMeet:
 
     def setup_browser(self):
         options = Options()
-        profile_path = os.path.abspath(os.path.join(os.getcwd(), f"CueMeetProfile_{self.id}"))
+        profile_path = os.path.abspath(os.path.join(os.getcwd(), f"BotProfile_{self.id}"))
         options.add_argument(f"user-data-dir={profile_path}")
         ext_path = os.path.abspath(os.path.join(os.getcwd(), "transcript_extension"))
         options.add_argument(f"--load-extension={ext_path}")

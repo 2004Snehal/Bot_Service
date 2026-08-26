@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Start the CueMeet Bot API server.
+Start the Bot Service API server.
 
 Usage:
     python run_server.py
@@ -32,7 +32,7 @@ if __name__ == "__main__":
     
     print(f"""
 ╔══════════════════════════════════════════════════════════════╗
-║                    CueMeet Bot API                           ║
+║                    Bot Service API                           ║
 ╠══════════════════════════════════════════════════════════════╣
 ║  Server: http://{host}:{port}                                   ║
 ║  Docs:   http://{host}:{port}/docs                              ║

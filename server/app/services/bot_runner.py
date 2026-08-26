@@ -93,7 +93,7 @@ def get_docker_client():
 #         }
 #         
 #         container = client.containers.run(
-#             image="cuemeet-bot:latest",
+#             image="bot-service:latest",
 #             detach=True,
 #             auto_remove=True,
 #             name=f"bot_{bot_id}_{meeting_id[:8]}",
@@ -315,9 +315,9 @@ def run_bot_logic(user_id: str, bot_id: str, meeting_id: str, meetlink: str, min
         logger.info(f"Launching bot subprocess for bot {bot_id} (user: {user_id})...")
 
         # Temp directory for bot to use (bot handles S3 uploads directly)
-        # Force /tmp/cuemeet to ensure we don't use project directory
-        temp_dir = "/tmp/cuemeet"
-        # Do not create any local storage folder outside /tmp/cuemeet
+        # Force /tmp/bot_service to ensure we don't use project directory
+        temp_dir = "/tmp/bot_service"
+        # Do not create any local storage folder outside /tmp/bot_service
         
         # Build environment variables (merge with current env)
         env_vars = os.environ.copy()

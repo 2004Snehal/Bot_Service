@@ -210,4 +210,6 @@ Thumbs.db
 !requirements_voice.txt
 *.md
 !README.md
+!TECHNICAL_DOCUMENTATION.md
+!VOICE_BOT_ARCHITECTURE.md
 migrate_storage_schema.py

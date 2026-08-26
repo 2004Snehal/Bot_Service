@@ -1,4 +1,4 @@
-# CueMeet Google Bot - Socket-based Audio (Minimal Dependencies)
+# Google Bot Service - Socket-based Audio (Minimal Dependencies)
 # 
 # This requirements file removes heavy ML dependencies (sentence_transformers, torch)
 # and uses WebSocket-based TTS instead.

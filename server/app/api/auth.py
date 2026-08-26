@@ -1,5 +1,5 @@
 """
-API Key Authentication for CueMeet Bot API
+API Key Authentication for Bot Service API
 ==========================================
 
 Security Implementation:
