@@ -1,5 +1,5 @@
 <div align="center">
-  <img src="https://i.postimg.cc/FRLZLSSF/Banner.png" alt="Meeting Bots Control Panel Banner" />
+  <img src="assets/banner.png" alt="HiCapy Meeting Bots Banner" />
   <h1>HiCapy Meeting Bots - Google Meeting Bot</h1>
 </div>
 
